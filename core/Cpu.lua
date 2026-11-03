@@ -496,6 +496,46 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 	end
 	const desc = readDescriptor(self, selector)
 	if not desc or band(desc.access, 0x80) == 0 then
+		-- 286 standard mode: a far transfer to a raw RM segment triggers
+		-- the PM→RM execution switch. Clear PE, set CS:IP, and continue
+		-- in real mode. Save the PM segment caches for restoration.
+		if selector >= 0x0064 and band(self.cr0, 1) ~= 0 then
+			self.pmSaved = {
+				es = self.es, ds = self.ds, fs = self.fs, gs = self.gs,
+				ss = self.ss, sp = self.r[5],
+				segBase = { es = self.segBase.es, ds = self.segBase.ds,
+					ss = self.segBase.ss, fs = self.segBase.fs, gs = self.segBase.gs },
+				segLimit = { es = self.segLimit.es, ds = self.segLimit.ds,
+					ss = self.segLimit.ss, fs = self.segLimit.fs, gs = self.segLimit.gs },
+				segAccess = { es = self.segAccess.es, ds = self.segAccess.ds,
+					ss = self.segAccess.ss, fs = self.segAccess.fs, gs = self.segAccess.gs },
+				segFlags = { es = self.segFlags.es, ds = self.segFlags.ds,
+					ss = self.segFlags.ss, fs = self.segFlags.fs, gs = self.segFlags.gs },
+				segSel = { es = self.segSel.es, ds = self.segSel.ds,
+					ss = self.segSel.ss, fs = self.segSel.fs, gs = self.segSel.gs },
+				gdtr = { base = self.gdtr.base, limit = self.gdtr.limit },
+				ldtr = self.ldtr, ldtrBase = self.ldtrBase, ldtrLimit = self.ldtrLimit,
+				cr0 = self.cr0,
+			}
+			self.cr0 = band(self.cr0, bit32.bnot(1)) -- clear PE → real mode
+			self.cs = selector
+			self.ip = offset
+			self.es, self.ds, self.fs, self.gs = selector, selector, selector, selector
+			self.ss = selector
+			self.segBase.es = selector * 16
+			self.segBase.ds = selector * 16
+			self.segBase.ss = selector * 16
+			self.segBase.cs = selector * 16
+			self.segBase.fs = selector * 16
+			self.segBase.gs = selector * 16
+			self.segLimit.es = 0xFFFF
+			self.segLimit.ds = 0xFFFF
+			self.segLimit.ss = 0xFFFF
+			self.segLimit.cs = 0xFFFF
+			self.segLimit.fs = 0xFFFF
+			self.segLimit.gs = 0xFFFF
+			return
+		end
 		error(("#GP: far transfer selector %04X absent or outside GDT/LDT limit"):format(selector))
 	end
 	const gateType = band(desc.access, 0x1F)
@@ -1639,6 +1679,53 @@ H[0xCF] = function(cpu: any) -- IRET
 	const wasEnabled = cpu:getF(IFF)
 	const newFlags = cpu:pop16()
 	local outerSp, outerSs
+
+	-- PM↔RM execution switch: if we saved PM state on a far transfer to an
+	-- RM segment, and the IRET target selector looks like a PM selector
+	-- (has LDT/GDT bit set or maps to a descriptor), restore the PM state.
+	if cpu.pmSaved and (csSel < 0x0064 or band(csSel, 4) ~= 0) then
+		local pm = cpu.pmSaved
+		cpu.pmSaved = nil
+		cpu.cr0 = pm.cr0
+		cpu:loadSeg("cs", csSel)
+		cpu:loadSeg("ss", pm.ss)
+		cpu.es = pm.es
+		cpu.ds = pm.ds
+		cpu.fs = pm.fs
+		cpu.gs = pm.gs
+		cpu.r[5] = pm.sp
+		cpu.segBase.es = pm.segBase.es
+		cpu.segBase.ds = pm.segBase.ds
+		cpu.segBase.ss = pm.segBase.ss
+		cpu.segBase.fs = pm.segBase.fs
+		cpu.segBase.gs = pm.segBase.gs
+		cpu.segBase.cs = pm.segBase.cs or lshift(csSel, 4)
+		cpu.segLimit.es = pm.segLimit.es
+		cpu.segLimit.ds = pm.segLimit.ds
+		cpu.segLimit.ss = pm.segLimit.ss
+		cpu.segLimit.fs = pm.segLimit.fs
+		cpu.segLimit.gs = pm.segLimit.gs
+		cpu.segLimit.cs = 0xFFFF
+		cpu.segAccess.es = pm.segAccess.es
+		cpu.segAccess.ds = pm.segAccess.ds
+		cpu.segAccess.ss = pm.segAccess.ss
+		cpu.segAccess.fs = pm.segAccess.fs
+		cpu.segAccess.gs = pm.segAccess.gs
+		cpu.segSel.es = pm.segSel.es
+		cpu.segSel.ds = pm.segSel.ds
+		cpu.segSel.ss = pm.segSel.ss
+		cpu.segSel.fs = pm.segSel.fs
+		cpu.segSel.gs = pm.segSel.gs
+		cpu.gdtr = pm.gdtr
+		cpu.ldtr = pm.ldtr
+		cpu.ldtrBase = pm.ldtrBase
+		cpu.ldtrLimit = pm.ldtrLimit
+		cpu.flags = bor(band(newFlags, cpu.flagMask), cpu.fixedFlags)
+		cpu.pmSaved = nil
+		cpu.irqDelay = 1
+		return
+	end
+
 	if band(cpu.cr0, 1) ~= 0 and band(csSel, 3) > band(cpu.cs, 3) then
 		outerSp = cpu:pop16()
 		outerSs = cpu:pop16()
