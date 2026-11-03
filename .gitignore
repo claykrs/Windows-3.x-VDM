@@ -38,3 +38,14 @@ __pycache__/
 win30a-media.zip
 
 *.log
+tools/capture*.png
+tools/cap_raw.txt
+tools/mcp_result.json
+tools/play.json
+tools/stop.json
+tools/console.json
+tools/vdmcheck.json
+tools/treecheck.json
+tools/bootlog.json
+tools/probeattr.json
+tools/findgui.json
