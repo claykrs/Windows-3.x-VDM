@@ -571,17 +571,27 @@ Writers of [0x328] are NOT in the DOSX PM code segment (64KB scanned, only
 an accidental `je +3` match) - the writer is in DOSX's REAL-mode half, whose
 segment is not yet dumped.
 
+BREAKTHROUGH (next pass): 0x8F96 is KRNL286's **PM INT 1 (single-step)
+handler**. KRNL286 switches PM->RM by setting the trap flag and
+single-stepping; the INT 1 handler tests DOSX data [0x328] bit 4 (0x10):
+- SET: `mov ax,0x63; lcall [0x310]` - DOSX RM service dispatch completes
+  the mode switch (data table shows [0x310] = 01E0:1380, DOSX RM entry).
+- CLEAR (our boot): restores AX/DI/DS and chains via `int 1; iret` to the
+  next INT 1 handler - which in our boot returns garbage AX=FB00 into ES.
+
 Next investigation steps:
-1. Dump the DOSX RM segment: the RM DOSX entry is reached right after
-   `EXEC C:\WINDOWS\SYSTEM\DOSX.EXE` (the RM half self-loads the PM part);
-   hook cs when it differs from 0x0053/0x02EF during the early boot and dump
-   64KB, then scan for writers of byte [0x328] (encoding: C6 06 28 03 or
-   via a segment register).
-2. Determine which DOS service DOSX's init depends on to set [0x328]
-   (probably reflects INT 21h/INT 13h hooks as "installed" once the RM
-   callbacks are registered) and why it is skipped in our boot.
-3. Fix accordingly (our DOS response or the missing DOSX init step), after
-   which 0x8F96 takes the real path and KRNL286 proceeds past FB00.
+1. Check IVT vector 1 content at fault time (zero vector 1 = the chained
+   handler is garbage; KRNL286 installed its own INT 1 hook at 0x8F96 via
+   AH=25h? - verify by tracing AH=25 calls for vector 1).
+2. Find who should SET [0x328] bit 4 (0x10): scan all KRNL286 code segments
+   (the NE has more code segments than the one dumped; dump each KRNL286
+   segment) and DOSX RM code for `or byte [0x328], 0x10` / `or [0x328], 0x10`.
+3. Likely fix: either emulate the missing DOSX init call that sets bit 4, or
+   make our INT 1 reflector complete the PM->RM switch when TF is set and
+   the target is a real-mode address (286 standard-mode contract: TF is how
+   KRNL286 gets back to real mode for DOS calls).
+4. After the switch works: KRNL286 reads its remainder via AH=3F into the
+   aliased buffer (code at 0x72D1-0x7314 does the full RM file read).
 
 ## 5. Known deviations (workarounds, not faked output)
 
