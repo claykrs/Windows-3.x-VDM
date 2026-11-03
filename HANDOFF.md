@@ -579,19 +579,39 @@ single-stepping; the INT 1 handler tests DOSX data [0x328] bit 4 (0x10):
 - CLEAR (our boot): restores AX/DI/DS and chains via `int 1; iret` to the
   next INT 1 handler - which in our boot returns garbage AX=FB00 into ES.
 
+BREAKTHROUGH 2 (live disassembly of loaded code): the faulting function
+(02EF:7214-0x737A) is KRNL286's RM file-read helper, DESIGNED to run in
+real mode. Verified code flow:
+1. `call 0x0DD1` (the "prepare RM switch" stub: decrements [0x18], tests
+   flag [0x38] bit0, calls 0x8F96 = the PM INT 1 handler when set).
+2. 0x8F96 = PM INT 1 (single-step) handler: tests [0x328] bit 4 (0x10):
+   SET -> `mov ax,0x63; lcall [0x310]` (DOSX RM service 0x63 completes the
+   PM->RM mode switch via 01E0:1380); CLEAR -> restore regs + `int 1; iret`
+   (chain to next INT 1 handler).
+3. The caller then loads RAW RM segments (ES=FB00, DS=FB00) and executes
+   `INT 21h AH=3F/42` via `call 0x1994` (the RM dispatcher) - all valid in
+   real mode, invalid in PM (which is why we #GP).
+4. After the read: copy RM buffer -> PM, zero remainder, return DX:AX.
+
+So KRNL286 EXPECTS the DOSX callback chain to switch the CPU to real mode
+before this code block runs (the whole helper is the RM half of a PM/RM
+file read). The bug: [0x328] bit 4 stays clear, so the INT 1 handler chains
+instead of switching.
+
 Next investigation steps:
-1. Check IVT vector 1 content at fault time (zero vector 1 = the chained
-   handler is garbage; KRNL286 installed its own INT 1 hook at 0x8F96 via
-   AH=25h? - verify by tracing AH=25 calls for vector 1).
-2. Find who should SET [0x328] bit 4 (0x10): scan all KRNL286 code segments
-   (the NE has more code segments than the one dumped; dump each KRNL286
-   segment) and DOSX RM code for `or byte [0x328], 0x10` / `or [0x328], 0x10`.
-3. Likely fix: either emulate the missing DOSX init call that sets bit 4, or
-   make our INT 1 reflector complete the PM->RM switch when TF is set and
-   the target is a real-mode address (286 standard-mode contract: TF is how
-   KRNL286 gets back to real mode for DOS calls).
-4. After the switch works: KRNL286 reads its remainder via AH=3F into the
-   aliased buffer (code at 0x72D1-0x7314 does the full RM file read).
+1. Find who sets [0x328] bit 4 (0x10): it is DOSX data, so the setter is
+   DOSX PM code. Scan the DOSX PM image (dump_dosx_full.bin) for writes -
+   the linear sweep missed it, so do a byte-pattern search for the encodings
+   (80 0E 28 03 / 80 4E 28 03 / 83 4E 28 03 / C6 46 xx via mov es:[di+X]
+   where X resolves to 0x328 - scan for `26 80 4e` and `26 80 0e` with
+   varying displacement, plus the 0x80/0x08 forms).
+2. Alternatively: check if KRNL286 sets bit 4 via a DOSX API call before
+   this code (trace all INT 21h/DOSX PM API calls with AX >= 0x60 in the
+   window between KRNL286 load and the fault; the flag setter is likely
+   DOSX service 0x0A "create data alias" or a sibling).
+3. Or brute-force: emulate bit 4 as always-set in our PM layer (temporary)
+   to see if the RM switch then completes and the file read succeeds -
+   this validates the hypothesis before hunting the exact setter.
 
 ## 5. Known deviations (workarounds, not faked output)
 
