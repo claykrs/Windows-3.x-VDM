@@ -1,0 +1,35 @@
+# copyrighted media -- never commit
+media/
+fixtures/WinBoot*.lua
+
+# host tooling binaries
+tools/bin/
+
+# generated import models (tools/build_rbxmx.lua / rojo build)
+Vdm.rbxmx
+Vdm.rbxm
+Vdm-demo.rbxlx
+Vdm-demo.rbxl
+DosMachine.rbxmx
+
+# generated Studio deploy payload (tools/studio_deploy.lua)
+tools/deploy_args.json
+
+# generated VGA test images
+tools/vga_test*.ppm
+
+# emulator memory dumps from diagnostic tools
+tools/memdump.bin
+tools/dump_*
+tools/*.bin
+tools/mcp_schema.mjs
+tools/probe_*
+tools/studio_*.json
+tools/analysis/dis16.py
+tools/analysis/disasm_import.py
+tools/analysis/kernel_ref.py
+tools/analysis/user_ref.py
+
+# Python analysis caches
+__pycache__/
+*.pyc
