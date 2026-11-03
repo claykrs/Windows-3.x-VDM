@@ -164,9 +164,10 @@ function Bios.int10(self: Bios)
 	if ah == 0x00 then -- set video mode
 		if vga then
 			vga:setMode(band(cpu.r[1], 0xFF))
-			self.machine:log(("INT10 mode=%d w=%d h=%d"):format(band(cpu.r[1], 0xFF), vga:width(), vga:height()))
-			self.machine:log(('INT10 mode=%d w=%d h=%d'):format(
-				band(cpu.r[1], 0xFF), vga:width(), vga:height()))
+			const width, height = vga:width() :: number, vga:height() :: number
+			self.machine:log(
+				("INT10 mode=%d w=%d h=%d"):format(band(cpu.r[1], 0xFF), width, height)
+			)
 		end
 		self.cursorX, self.cursorY = 0, 0
 	elseif ah == 0x0F then -- get video mode

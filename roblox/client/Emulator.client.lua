@@ -8,7 +8,7 @@ const RunService = game:GetService("RunService")
 const UserInputService = game:GetService("UserInputService")
 const Players = game:GetService("Players")
 const StarterGui = game:GetService("StarterGui")
-const GuiService = game:GetService("GuiService")
+
 const SoundService = game:GetService("SoundService")
 const Workspace = game:GetService("Workspace")
 
@@ -111,7 +111,7 @@ const playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 const screenGui = cleaner:Add(Instance.new("ScreenGui"))
 screenGui.Name = "VdmGui"
 screenGui.ResetOnSpawn = false
-screenGui.IgnoreGuiInset = false
+screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
@@ -149,21 +149,12 @@ local function viewportSize(): Vector2
 	return Vector2.new(1280, 720)
 end
 
-local function guiInsets(): (Vector2, Vector2)
-	local ok, topLeft, bottomRight = pcall(function()
-		return GuiService:GetGuiInset()
-	end)
-	if ok and typeof(topLeft) == "Vector2" and typeof(bottomRight) == "Vector2" then
-		return topLeft, bottomRight
-	end
-	return Vector2.zero, Vector2.zero
-end
-
 local function fitWindow(): UDim2
 	const viewport = viewportSize()
-	const insetTopLeft, insetBottomRight = guiInsets()
-	const availableWidth = math.max(320, viewport.X - insetTopLeft.X - insetBottomRight.X - 32)
-	const availableHeight = math.max(240, viewport.Y - insetTopLeft.Y - insetBottomRight.Y - 32)
+	-- the ScreenGui covers the full viewport (IgnoreGuiInset), so the only
+	-- reservation is a small margin
+	const availableWidth = math.max(320, viewport.X - 32)
+	const availableHeight = math.max(240, viewport.Y - 32)
 	local best = 0
 	for scale = MIN_WINDOW_SCALE, MAX_WINDOW_SCALE do
 		const width = GUEST_WIDTH * scale
@@ -507,10 +498,13 @@ local function updateMouse(position: Vector2?)
 		return
 	end
 	if position then
+		-- InputObject.Position is a Vector3; lastPointer stays a Vector2 in
+		-- GUI space, and the Heartbeat poll adds Vector2 deltas to it.
+		const guiPos = Vector2.new(position.X, position.Y)
 		-- While captured the real pointer is locked; InputChanged still reports
 		-- the frozen position. Use the virtual pointer driven by GetMouseDelta.
 		if not pointerCapture then
-			lastPointer = position
+			lastPointer = guiPos
 		end
 	end
 	const size = vgaSink.root.AbsoluteSize
@@ -745,10 +739,11 @@ cleaner:Connect(RunService.Heartbeat, function()
 		end
 		updateMouse(nil)
 	else
-		const inset = GuiService:GetGuiInset()
 		const mouse = UserInputService:GetMouseLocation()
+		-- IgnoreGuiInset is on, so GUI space and GetMouseLocation share the
+		-- same origin (true screen top-left); no inset compensation.
 		if mouse.X >= 0 and mouse.Y >= 0 then
-			updateMouse(Vector2.new(mouse.X - inset.X, mouse.Y - inset.Y))
+			updateMouse(Vector2.new(mouse.X, mouse.Y))
 		else
 			updateMouse(nil)
 		end

@@ -11,7 +11,7 @@ import { join } from "node:path";
 const bat = join(homedir(), "AppData", "Local", "Roblox", "mcp.bat");
 
 const [,, mode, toolName, rawArgs] = process.argv;
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const proc = spawn("cmd.exe", ["/c", bat], { stdio: ["pipe", "pipe", "pipe"] });
 
@@ -69,10 +69,12 @@ if (mode === "list") {
 } else if (mode === "call") {
 	const args = rawArgs ? JSON.parse(rawArgs) : {};
 	const res = await request("tools/call", { name: toolName, arguments: args });
+	writeFileSync("mcp_result.json", JSON.stringify(res));
 	console.log(JSON.stringify(res, null, 1).slice(0, 12000));
 } else if (mode === "callfile") {
 	const args = JSON.parse(readFileSync(rawArgs, "utf8"));
 	const res = await request("tools/call", { name: toolName, arguments: args }, 180000);
+	writeFileSync("mcp_result.json", JSON.stringify(res));
 	console.log(JSON.stringify(res));
 } else {
 	console.error("usage: node mcp.mjs list | call <tool> <json>");
