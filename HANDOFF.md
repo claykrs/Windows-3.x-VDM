@@ -521,6 +521,39 @@ tools/          run check build_rbxmx studio_deploy install stage extract ...
    `1110:5A66` unhandled INT 05), not KRNL386, so R7 stays on the 286 path.
    Photoshop 2.5 remains the north star; 386 Enhanced mode is later.
 
+## 4b. FB00 fault - verified context (R7 resume point)
+
+Probe: `lune run media/win31/probe31.lua --steps 146000 --trace` (per-step trail
+prints at the end; media/ is git-ignored so probe edits stay local).
+`--trace-ed1` hooks were added too (KRNL286 02EF:0ED1/0EE9/0EF4/7289) but the
+ED1 offsets never fire in THIS boot - the helper that faults runs at a
+different KRNL segment layout each install; key probes on CS=02EF are wrong -
+use the trail instead.
+
+Verified fault context at step ~144000:
+- faulting instruction: `mov es, [bp-4]` loading **ES=FB00** with AX=FB00
+  (KRNL286 CS=02EF, base 0x8FDB0); ES=03F7 (a valid LDT selector) was fine
+  just before.
+- boot sequence right before: `EXEC C:\WINDOWS\SYSTEM\WSWAP.EXE` then
+  `EXEC C:\WINDOWS\SYSTEM\DOSX.EXE`; INT 2Fh 4300/4310 XMS calls healthy;
+  `OPEN FAIL EMMXXXX0` and `OPEN FAIL C:\WINDOWS\dosx.exe` (benign probes);
+  then `EXEC wswap.exe` (step ~8000).
+- FB00 is not in our arena (0x1100-0xA000) and not a valid GDT selector
+  (GDT limit 0x11F). It is almost certainly a REAL-mode segment DOSX hands
+  KRNL286 expecting its own PM alias - i.e. the missing piece is DOSX's
+  real-segment-to-selector alias creation (or the DOS response DOSX based
+  it on).
+
+Next investigation steps:
+1. Disassemble the DOSX PM dispatcher `0053:2197` + the service KRNL286's
+   helper ED1 (`call 0x21B1` at 02EF:0EF1) invokes; identify which DOS call
+   result DOSX translates into FB00.
+2. Compare our DOS responses (SFT/LoL/PSP/environment segments) against the
+   values real DOS 5.0 returns; FB00 may be derived from OUR addresses.
+3. Candidate fixes: create the missing GDT/LDT alias in our PM layer when
+   DOSX requests a real-segment alias, or return the real-DOS-equivalent
+   address.
+
 ## 5. Known deviations (workarounds, not faked output)
 
 The guest runs genuine Microsoft binaries; nothing below hardcodes a success
