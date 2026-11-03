@@ -610,6 +610,7 @@ Dos.FN[0x5B] = function(self: Dos, cpu: any, machine: Host) -- create new file
 end
 
 Dos.FN[0x3D] = function(self: Dos, cpu: any, machine: Host) -- open file
+	machine:log(("OPEN [%s]"):format(self:readRawAsciz(cpu)))
 	const raw = self:readRawAsciz(cpu)
 	const device = self:deviceName(raw)
 	if device then
