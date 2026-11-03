@@ -36,3 +36,5 @@ __pycache__/
 
 # release media archive
 win30a-media.zip
+
+*.log
