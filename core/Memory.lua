@@ -9,7 +9,7 @@ const band, bor, lshift, rshift = bit32.band, bit32.bor, bit32.lshift, bit32.rsh
 const Memory = {}
 Memory.__index = Memory
 
-Memory.SIZE = 1024 * 1024
+Memory.SIZE = 4 * 1024 * 1024 -- 4 MiB (Windows 3.1 standard mode)
 const MASK_20 = 0xFFFFF
 const APERTURE_START = 0xA0000
 const APERTURE_END = 0xAFFFF

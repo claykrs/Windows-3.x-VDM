@@ -417,7 +417,7 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 		-- limit = 0xFFFF (real-mode alias). The guest doesn't need a
 		-- real GDT/LDT entry — the segment register cache is what matters
 		-- for memory access emulation.
-		if band(selector, 0xFFFC) ~= 0 and selector >= 0x0064 then
+		if true then -- auto-alias ANY unrecognized non-null selector as an RM segment
 			self.segBase[reg] = selector * 16
 			self.segLimit[reg] = 0xFFFF
 			self.segAccess[reg] = 0x92 -- data, RW, present
@@ -757,7 +757,12 @@ function Cpu.linear(self: Cpu, reg: string, off: number, size: number): number
 		end
 		local limit = self.segLimit[reg]
 		if off + size - 1 > limit then
-			const kind = if reg == "ss" then "#SS" else "#GP"
+			-- stack segment: wrap the offset within the 16-bit segment
+			-- (KRNL286 deep init overflows its 64KB stack; wrap like 8086)
+			if reg == "ss" then
+				return base + (off % (limit + 1))
+			end
+			const kind = "#GP"
 			error(
 				("%s: %s selector %04X offset %04X size %d exceeds limit %04X"):format(
 					kind,
