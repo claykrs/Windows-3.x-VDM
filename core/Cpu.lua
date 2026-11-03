@@ -411,28 +411,18 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 	end
 	const desc = readDescriptor(self, selector)
 	if not desc or band(desc.access, 0x80) == 0 then
-		-- 286 standard mode: DOSX aliases RM segments into LDT selectors so
-		-- KRNL286 can load raw RM segments in PM. When a PM selector load
-		-- targets a raw RM segment (>= 0x100), transparently allocate an
-		-- LDT entry, write the alias descriptor, and use the LDT selector.
+		-- 286 standard mode: DOSX aliases RM segments into PM selectors.
+		-- When a PM selector load targets a raw RM segment (>= 0x100),
+		-- transparently map it: set the segment cache to base = seg*16,
+		-- limit = 0xFFFF (real-mode alias). The guest doesn't need a
+		-- real GDT/LDT entry — the segment register cache is what matters
+		-- for memory access emulation.
 		if band(selector, 0xFFFC) ~= 0 and selector >= 0x0064 then
-			local idx = self.dosAliasNext or 0x100
-			self.dosAliasNext = idx + 1
-			local descAddr = self.ldtrBase + idx * 8
-			local base = selector * 16
-			self.mem:write16(descAddr, 0xFFFF)
-			self.mem:write16(descAddr + 2, band(base, 0xFFFF))
-			self.mem:write8(descAddr + 4, band(rshift(base, 16), 0xFF))
-			self.mem:write8(descAddr + 5, 0x92) -- data, RW, present
-			self.mem:write8(descAddr + 6, 0x00) -- byte-granular
-			self.mem:write8(descAddr + 7, 0)
-			local aliasSel = bor(lshift(idx, 3), 4, 3) -- LDT bit, RPL 3
-			setSeg(self, reg, aliasSel)
-			self.segBase[reg] = base
+			self.segBase[reg] = selector * 16
 			self.segLimit[reg] = 0xFFFF
-			self.segAccess[reg] = 0x92
+			self.segAccess[reg] = 0x92 -- data, RW, present
 			self.segFlags[reg] = 0
-			self.segSel[reg] = aliasSel
+			self.segSel[reg] = selector
 			return
 		end
 		error(
