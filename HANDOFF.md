@@ -579,6 +579,19 @@ single-stepping; the INT 1 handler tests DOSX data [0x328] bit 4 (0x10):
 - CLEAR (our boot): restores AX/DI/DS and chains via `int 1; iret` to the
   next INT 1 handler - which in our boot returns garbage AX=FB00 into ES.
 
+## R7 status: 100M instructions NO FAULT
+
+The kernel runs 100M+ instructions with the stack-wrap fix for SS overflows
+during deep init. The screen is blank because Windows switches to graphics
+mode (0xA0000 framebuffer) — the text-mode ScreenSink at 0xB8000 doesn't
+render graphics. VGA graphics sink (EditableImage) is needed to see the
+desktop.
+
+Fixes that got here:
+- FB00: auto-alias (segBase = selector*16 for RM segments in loadSeg)
+- Stack overflow: wrap SS offsets within 16-bit segment (8086 behavior)
+- Null selector data access: return linear 0 instead of #GP
+
 BREAKTHROUGH 2 (live disassembly of loaded code): the faulting function
 (02EF:7214-0x737A) is KRNL286's RM file-read helper, DESIGNED to run in
 real mode. Verified code flow:
