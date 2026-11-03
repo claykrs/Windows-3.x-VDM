@@ -267,7 +267,7 @@ local function getSeg(cpu: any, reg: string): number
 	elseif reg == "gs" then
 		return cpu.gs
 	end
-	error("bad segment register " .. reg)
+	error("bad segment register " .. tostring(reg))
 end
 
 local function setSeg(cpu: any, reg: string, selector: number)
@@ -285,7 +285,7 @@ local function setSeg(cpu: any, reg: string, selector: number)
 	elseif reg == "gs" then
 		cpu.gs = selector
 	else
-		error("bad segment register " .. reg)
+		error("bad segment register " .. tostring(reg))
 	end
 end
 
@@ -388,6 +388,9 @@ end
 
 function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 	selector = band(selector, 0xFFFF)
+	if reg == nil then
+		return
+	end
 	if band(self.cr0, 1) == 0 then
 		setSeg(self, reg, selector)
 		cacheReal(self, reg, selector)

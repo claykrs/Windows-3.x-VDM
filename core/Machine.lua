@@ -428,6 +428,14 @@ function Machine.new(deps: Deps, config: Config?): Machine
 	self.pendingInt = nil -- interrupt to re-dispatch after a keyboard wait
 	self.exitCode = nil
 
+	-- INT 5 (print screen / BOUND): install a minimal IRET stub at a fixed
+	-- offset past the main stub block (adding it to `handled` would shift
+	-- stub offsets and break hardcoded test addresses)
+	local int5Off = 0x100
+	self.mem:write8(lshift(0xF100, 4) + int5Off, 0xCF) -- IRET
+	self.mem:write16(5 * 4, int5Off)
+	self.mem:write16(5 * 4 + 2, 0xF100)
+
 	-- BIOS data area: conventional memory size in KB (640) + equipment word
 	-- (floppy present, pointing device, math coprocessor, 80x25 color video,
 	-- 1 floppy drive). MOUSE.DRV's PS/2 probe checks bit 2 of INT 11h before
