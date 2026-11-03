@@ -1,0 +1,36 @@
+{
+	"name": "Vdm",
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"$className": "ReplicatedStorage",
+			"$attributes": {
+				"VdmBootWindows": true
+			},
+			"Vdm": {
+				"$path": "core"
+			},
+			"VdmUi": {
+				"$path": "roblox/ui"
+			},
+			"VdmFixtures": {
+				"$path": "fixtures"
+			}
+		},
+		"ServerScriptService": {
+			"$className": "ServerScriptService",
+			"VdmWorld": {
+				"$path": "roblox/server/World.server.lua"
+			}
+		},
+		"StarterPlayer": {
+			"$className": "StarterPlayer",
+			"StarterPlayerScripts": {
+				"$className": "StarterPlayerScripts",
+				"VdmClient": {
+					"$path": "roblox/client"
+				}
+			}
+		}
+	}
+}
