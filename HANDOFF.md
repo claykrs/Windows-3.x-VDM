@@ -521,6 +521,19 @@ tools/          run check build_rbxmx studio_deploy install stage extract ...
    `1110:5A66` unhandled INT 05), not KRNL386, so R7 stays on the 286 path.
    Photoshop 2.5 remains the north star; 386 Enhanced mode is later.
 
+## 4a2. Boot status at 10M steps (verified)
+
+WIN.COM -> WSWAP -> DOSX (PM switch, GDT/LDT/IDT, ring 3) -> KRNL286 EXEC ->
+KERNEL initializes (197 exports, DGROUP allocated, heap init) -> runs 10M+
+instructions without faulting. File opens logged: DOSX.EXE, WSWAP.EXE,
+SYSTEM.INI, KRNL286.EXE, CON (x5). No INT 10h mode changes yet (still text
+mode 3). No GDI/USER module loads yet.
+
+The kernel is likely doing internal PM initialization (task database,
+module table, selector management) that takes many instructions. Next:
+trace the kernel's execution to find whether it's in a wait loop or
+progressing through init. Use `tools/sample.lua` for hot spots.
+
 ## 4b. FB00 fault - verified context (R7 resume point)
 
 Probe: `lune run media/win31/probe31.lua --steps 146000 --trace` (per-step trail
