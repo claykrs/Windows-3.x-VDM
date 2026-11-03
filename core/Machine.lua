@@ -551,6 +551,7 @@ function Machine.new(deps: Deps, config: Config?): Machine
 	const stubSeg = 0xF100
 	const handled = {
 		0x00,
+		0x05,
 		0x10,
 		0x11,
 		0x12,

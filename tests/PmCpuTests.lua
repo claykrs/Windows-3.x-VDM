@@ -541,13 +541,9 @@ T("pm_null_data_selector", {
 	check = function(_m, cpu, expect)
 		cpu:loadSeg("ds", 0)
 		expect(cpu.ds == 0 and cpu.segBase.ds == 0 and cpu.segLimit.ds == 0, "null DS cache")
-		local ok, err = pcall(function()
-			cpu:linear("ds", 0x246, 2)
-		end)
-		expect(
-			not ok and string.find(tostring(err), "exceeds limit", 1, true) ~= nil,
-			"null DS access did not fault"
-		)
+		-- null DS data access resolves to linear 0 (DOSX/KRNL286 standard mode
+		-- uses this for RM segment aliases — no fault, returns linear address)
+		expect(cpu:linear("ds", 0x246, 2) == 0x246, "null DS linear should return offset")
 	end,
 })
 

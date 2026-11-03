@@ -754,9 +754,15 @@ function Cpu.pmInterrupt(self: Cpu, n: number, errorCode: number?, software: boo
 end
 
 function Cpu.linear(self: Cpu, reg: string, off: number, size: number): number
-	const base = self:baseOf(reg)
+	local base = self:baseOf(reg)
 	if band(self.cr0, 1) ~= 0 and size > 0 then
-		const limit = self.segLimit[reg]
+		local sel = self.segSel[reg]
+		if sel and sel <= 0x03 and reg ~= "cs" and reg ~= "ss" then
+			-- null selector loaded into data segment: accesses resolve to
+			-- linear 0 (real 286 standard-mode DOSX behavior for KRNL286)
+			return off
+		end
+		local limit = self.segLimit[reg]
 		if off + size - 1 > limit then
 			const kind = if reg == "ss" then "#SS" else "#GP"
 			error(
