@@ -544,10 +544,22 @@ Verified fault context at step ~144000:
   real-segment-to-selector alias creation (or the DOS response DOSX based
   it on).
 
+Progress this pass: the full faulting helper is decoded (live dump via
+probe31's dump_krnl.bin hook). It is KRNL286's RM-file-read block helper:
+allocates an RM buffer segment, reads file data through the DOSX callback
+(`call 0x1994` = RM INT 21h dispatcher; AH=3F/42 visible at 0x72BF/0x730D),
+copies PM-to-PM, zeroes the remainder. The ES=FB00 value comes from
+`call 0x282F` (a tiny stub: decrements word [0x18], tests flag [0x38] bit0,
+and calls 0x8F96 when set) reached via `call 0x0DD1` -> `call 0x282F`. The
+0x8F96 callee is outside the dumped range (krnlBase+0x8F96 = the next
+candidate to dump/trace). Working hypothesis: word [0x18] is a nesting
+counter and [0x38] a "switch to real mode for this call" flag; the helper
+returns a REAL-mode segment FB00 that DOSX should alias, but the alias
+creation goes through 0x8F96 which our PM layer mishandles.
+
 Next investigation steps:
-1. Disassemble the DOSX PM dispatcher `0053:2197` + the service KRNL286's
-   helper ED1 (`call 0x21B1` at 02EF:0EF1) invokes; identify which DOS call
-   result DOSX translates into FB00.
+1. Dump/trace krnlBase+0x8F96 (the callee taken when flag [0x38] is set) -
+   it almost certainly performs the PM->RM switch for the buffer allocation.
 2. Compare our DOS responses (SFT/LoL/PSP/environment segments) against the
    values real DOS 5.0 returns; FB00 may be derived from OUR addresses.
 3. Candidate fixes: create the missing GDT/LDT alias in our PM layer when
