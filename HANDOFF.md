@@ -557,14 +557,31 @@ counter and [0x38] a "switch to real mode for this call" flag; the helper
 returns a REAL-mode segment FB00 that DOSX should alias, but the alias
 creation goes through 0x8F96 which our PM layer mishandles.
 
+Progress next pass: 0x8F96 is disassembled (live dump now covers the full
+KRNL286 segment, media/win31/dump_krnl.bin, plus DOSX PM code/data dumps).
+0x8F96 is DOSX's reflector: DS = cs:[0x30] (DOSX data), then tests status
+byte [0x328]:
+- bit 0x10 CLEAR in our boot -> falls into `int 1; iret`, popping garbage
+  (AX=FB00) -> KRNL286 loads ES=FB00 -> #GP. This IS the failure path.
+- bit 0x10 SET would take the `mov ax,0x63; lcall [0x310]/[0x308]` path
+  (DOSX RM service dispatch through data pointers).
+So DOSX's reflector status byte [0x328] (its data segment) is 0x00 at first
+CS=0x0053 sighting - the reflector never reports its PM hooks installed.
+Writers of [0x328] are NOT in the DOSX PM code segment (64KB scanned, only
+an accidental `je +3` match) - the writer is in DOSX's REAL-mode half, whose
+segment is not yet dumped.
+
 Next investigation steps:
-1. Dump/trace krnlBase+0x8F96 (the callee taken when flag [0x38] is set) -
-   it almost certainly performs the PM->RM switch for the buffer allocation.
-2. Compare our DOS responses (SFT/LoL/PSP/environment segments) against the
-   values real DOS 5.0 returns; FB00 may be derived from OUR addresses.
-3. Candidate fixes: create the missing GDT/LDT alias in our PM layer when
-   DOSX requests a real-segment alias, or return the real-DOS-equivalent
-   address.
+1. Dump the DOSX RM segment: the RM DOSX entry is reached right after
+   `EXEC C:\WINDOWS\SYSTEM\DOSX.EXE` (the RM half self-loads the PM part);
+   hook cs when it differs from 0x0053/0x02EF during the early boot and dump
+   64KB, then scan for writers of byte [0x328] (encoding: C6 06 28 03 or
+   via a segment register).
+2. Determine which DOS service DOSX's init depends on to set [0x328]
+   (probably reflects INT 21h/INT 13h hooks as "installed" once the RM
+   callbacks are registered) and why it is skipped in our boot.
+3. Fix accordingly (our DOS response or the missing DOSX init step), after
+   which 0x8F96 takes the real path and KRNL286 proceeds past FB00.
 
 ## 5. Known deviations (workarounds, not faked output)
 
