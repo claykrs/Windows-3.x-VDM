@@ -20,12 +20,31 @@ passes with 667 assertions.
   click at the OK button dismisses Tetris' About dialog, and the rendered
   arrow coincides with the host pointer. Calibration driver:
   `tools/out/driver.py` (git-ignored).
-- Win 3.1 R8 probe (`tools/out/p31_r8.log`, 150M steps, `--xms`): WSWAP.EXE
-  and DOSX.EXE EXEC cleanly from `C:\WINDOWS\SYSTEM`, then KRNL286.EXE
-  (71730 bytes) EXECs and keeps executing in protected mode (PE=1, PC
-  advancing, no fault, no DOS call since EXEC; screen still DOS text).
-  `INT 16h AH=6F` is an unhandled-but-non-fatal probe on this path. Next:
-  instrument the PM loop around CS=02EF to see what KRNL286 waits on.
+- Win 3.1 R8 **root cause found and fixed** (probe `media/win31/probe31.lua`,
+  logs `tools/out/p31_r8*.log`, commit `3836f1f`): the silent "40M instructions
+  in PM with PC advancing" was the CPU executing zeroed memory. Chain:
+  DOSX claims all XMS (handle 1 = `0x110000 + 0x2F0000`) and copies its PM
+  image to the bottom of that region (image at start + `0x920`, GDT at
+  start + `0x800`); the KRNL286 EXEC ran `Dos.lua`'s `xms:releaseAll()`
+  (the DOSX-to-kernel handoff), which orphaned the image; WSWAP's swap-block
+  allocation then first-fit onto the same bytes (`handle 2 = 0x110000`) and
+  its swap-out moves zeroed the PM code; the next far transfer to selector
+  `0x53` marched through zeros with IF=0 forever. Fixes: `Xms.allocate` now
+  allocates from the highest free gap (top-first) so post-handoff blocks
+  never touch the bottom-resident image, the handoff release stays in EXEC,
+  and XmsTests pin both. Probe gotchas recorded along the way: `--xms` as
+  the last argv token silently no-ops (`argValue` needs a following token),
+  and the fake-XMS stub path fails WIN.COM's HIMEM validation ("Invalid
+  HIMEM.SYS") — the no-`--xms` boot is the productive one.
+- New R8 frontier (`tools/out/p31_r8t.log`): with the fix the kernel executes
+  real PM code past the swap handoff and faults with a genuine guest-visible
+  `#GP`: `es selector 03F7 (LDT, index 0x7E) offset F4D0 exceeds limit 05AF`
+  at step 144k, called from KRNL286 code at `02EF:3322`/`6CD6`. Next: trace
+  where the kernel obtained selector `0x03F7` (LDT entry beyond limit — a
+  wrong or truncated LDT entry, or a fixup that did not apply) and why it
+  dereferences offset `0xF4D0`.
+- Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
+  unhandled-but-non-fatal probe on this path.
 - Studio note: after a Studio reopen the instance id changes; the deploy
   tools' default `STUDIO_ID` must match the live instance (both
   `tools/studioDeploy.lua` and `tools/studio_deploy.lua` are updated; the
