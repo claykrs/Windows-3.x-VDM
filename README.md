@@ -22,9 +22,11 @@ executing on the emulated CPU. The public repository is
 - Microsoft Tetris 2.0 (Windows Entertainment Package: `TETRIS.EXE`,
   `ABOUTTET.DLL`, `WIN87EM.DLL`) runs, including live in Roblox Studio.
 - Input is emulated hardware, not LED fakes: an 8042 keyboard (set-1 make/break
-  scan codes, typematic repeat) and a 1:1 PS/2 mouse (IRQ12/C207, half-count
-  2 px-per-count contract with re-anchoring). Verified: Alt+F menus, Notepad
-  typing, Calculator keypad.
+  scan codes, typematic repeat) and a PS/2 mouse (IRQ12/C207, half-count
+  2 px-per-count contract with re-anchoring plus a measured +58 px Y-bias
+  compensation). Verified: Alt+F menus, Notepad typing, Calculator keypad, and
+  a fully synthetic mouse click dismissing Tetris' About dialog in a live
+  Studio boot.
 - PC speaker: the 8254 channel-2 divisor (ports 0x43/0x42) and the port 0x61
   gate are modelled; the host replays an optional short beep on state changes.
 - The gate `lune run tools/check.lua` passes: stylua, selene (luau + roblox),
@@ -164,6 +166,30 @@ Application compatibility is verified with the harness and documented in
   draw beside their opaque value backgrounds. Gameplay is unaffected.
 - **Missing subsystems.** No printer (LPT/INT 17h/spooler), serial (8250/INT
   14h) or OLE/clipboard backends; installers run from the staged VFS only.
+
+## In progress: Windows 3.1 standard mode
+
+The 286 protected-mode track (real `DOSX.EXE` + `KRNL286.EXE`) is actively
+being finished. Where it stands:
+
+- **Done:** the PM core (GDT/LDT/IDT/TSS, ring transitions, PM↔RM switching
+  with full state save/restore), the XMS driver, and the boot chain —
+  `WIN.COM` EXECs WSWAP and DOSX cleanly, DOSX claims extended memory,
+  relocates its PM image, and KRNL286 executes in protected mode.
+- **Just fixed:** the boot's silent stall was the CPU executing zeroed memory.
+  Root cause: the kernel EXEC's XMS ownership handoff orphaned DOSX's PM
+  image, and WSWAP's swap-block allocation (low-first) landed on the same
+  bytes and zeroed the code. Allocation is now top-first and the handoff is
+  pinned by tests (`3836f1f`).
+- **Being finished now:** the kernel's first protected-mode fault — a `#GP`
+  on an LDT selector (`es=03F7`, offset `0xF4D0` beyond limit `0x5AF`) at
+  step ~144k. Tracing that selector's provenance (a wrong or truncated LDT
+  entry, or a fixup that did not apply) is the current frontier; after it,
+  the kernel continues PM initialization toward USER/GDI 3.1.
+
+Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
+[docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
+targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
 
 ## Roadmap
 
