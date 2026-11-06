@@ -82,6 +82,10 @@ export type Cpu = {
 	segAccess: { [string]: number },
 	segFlags: { [string]: number },
 	segSel: { [string]: number },
+	-- Data segments with the direction bit set expand downward; linear()
+	-- validates offsets against (limit, segUpper] instead of [0, limit].
+	segExpand: { [string]: boolean },
+	segUpper: { [string]: number },
 	ip: number,
 	flags: number,
 	cr0: number,
@@ -207,6 +211,8 @@ function Cpu.new(mem: any, io: Io?, config: any?): Cpu
 	self.segLimit = { es = 0xFFFF, cs = 0xFFFF, ss = 0xFFFF, ds = 0xFFFF, fs = 0xFFFF, gs = 0xFFFF }
 	self.segAccess = { es = 0x93, cs = 0x9B, ss = 0x93, ds = 0x93, fs = 0x93, gs = 0x93 }
 	self.segFlags = { es = 0, cs = 0, ss = 0, ds = 0, fs = 0, gs = 0 }
+	self.segExpand = { es = false, cs = false, ss = false, ds = false, fs = false, gs = false }
+	self.segUpper = { es = 0xFFFF, cs = 0xFFFF, ss = 0xFFFF, ds = 0xFFFF, fs = 0xFFFF, gs = 0xFFFF }
 	self.segSel = { es = 0, cs = 0, ss = 0, ds = 0, fs = 0, gs = 0 }
 	self.ip = 0
 	self.flags = bor(self.fixedFlags, IFF)
@@ -297,6 +303,8 @@ local function cacheReal(self: any, reg: string, selector: number)
 	self.segLimit[reg] = 0xFFFF
 	self.segAccess[reg] = if reg == "cs" then 0x9B else 0x93
 	self.segFlags[reg] = 0
+	self.segExpand[reg] = false
+	self.segUpper[reg] = 0xFFFF
 	self.segSel[reg] = selector
 end
 
@@ -409,6 +417,8 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 		self.segLimit[reg] = 0
 		self.segAccess[reg] = 0
 		self.segFlags[reg] = 0
+		self.segExpand[reg] = false
+		self.segUpper[reg] = 0xFFFF
 		self.segSel[reg] = 0
 		return
 	end
@@ -425,6 +435,8 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 			self.segLimit[reg] = 0xFFFF
 			self.segAccess[reg] = 0x92 -- data, RW, present
 			self.segFlags[reg] = 0
+			self.segExpand[reg] = false
+			self.segUpper[reg] = 0xFFFF
 			self.segSel[reg] = selector
 			return
 		end
@@ -457,6 +469,15 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 	self.segAccess[reg] = desc.access
 	self.segFlags[reg] = desc.flags
 	self.segSel[reg] = selector
+	-- Data segments with the direction bit set expand DOWNWARD: valid offsets
+	-- run above the limit (16-bit byte-granular: limit+1..0xFFFF). KRNL286's
+	-- ring-3 data segments use them (access 0xF3, limit 0x5AF, accesses above
+	-- it), so the limit check in linear() needs the direction and the upper
+	-- bound, not the raw limit.
+	local isData = band(desc.access, 0x18) == 0x10
+	self.segExpand[reg] = isData and band(desc.access, 0x4) ~= 0 or false
+	local granular32 = band(desc.flags, 0xC0) ~= 0
+	self.segUpper[reg] = granular32 and 0xFFFFFFFF or 0xFFFF
 end
 
 function Cpu.baseOf(self: Cpu, reg: string): number
@@ -538,6 +559,20 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 					fs = self.segSel.fs,
 					gs = self.segSel.gs,
 				},
+				segExpand = {
+					es = self.segExpand.es,
+					ds = self.segExpand.ds,
+					ss = self.segExpand.ss,
+					fs = self.segExpand.fs,
+					gs = self.segExpand.gs,
+				},
+				segUpper = {
+					es = self.segUpper.es,
+					ds = self.segUpper.ds,
+					ss = self.segUpper.ss,
+					fs = self.segUpper.fs,
+					gs = self.segUpper.gs,
+				},
 				gdtr = { base = self.gdtr.base, limit = self.gdtr.limit },
 				ldtr = self.ldtr,
 				ldtrBase = self.ldtrBase,
@@ -561,6 +596,18 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 			self.segLimit.cs = 0xFFFF
 			self.segLimit.fs = 0xFFFF
 			self.segLimit.gs = 0xFFFF
+			self.segExpand.es = false
+			self.segExpand.ds = false
+			self.segExpand.ss = false
+			self.segExpand.cs = false
+			self.segExpand.fs = false
+			self.segExpand.gs = false
+			self.segUpper.es = 0xFFFF
+			self.segUpper.ds = 0xFFFF
+			self.segUpper.ss = 0xFFFF
+			self.segUpper.cs = 0xFFFF
+			self.segUpper.fs = 0xFFFF
+			self.segUpper.gs = 0xFFFF
 			return
 		end
 		error(("#GP: far transfer selector %04X absent or outside GDT/LDT limit"):format(selector))
@@ -790,6 +837,23 @@ function Cpu.linear(self: Cpu, reg: string, off: number, size: number): number
 			return off
 		end
 		local limit = self.segLimit[reg]
+		if self.segExpand[reg] then
+			-- expand-down data: valid offsets are (limit, upper]
+			if off <= limit or off + size - 1 > (self.segUpper[reg] or 0xFFFF) then
+				const kind = "#GP"
+				error(
+					("%s: %s selector %04X offset %04X size %d below expand-down limit %04X"):format(
+						kind,
+						reg,
+						getSeg(self, reg),
+						off,
+						size,
+						limit
+					)
+				)
+			end
+			return base + off
+		end
 		if off + size - 1 > limit then
 			-- stack segment: wrap the offset within the 16-bit segment
 			-- (KRNL286 deep init overflows its 64KB stack; wrap like 8086)
@@ -1754,6 +1818,20 @@ H[0xCF] = function(cpu: any) -- IRET
 		cpu.segSel.ss = pm.segSel.ss
 		cpu.segSel.fs = pm.segSel.fs
 		cpu.segSel.gs = pm.segSel.gs
+		if pm.segExpand then
+			cpu.segExpand.es = pm.segExpand.es
+			cpu.segExpand.ds = pm.segExpand.ds
+			cpu.segExpand.ss = pm.segExpand.ss
+			cpu.segExpand.fs = pm.segExpand.fs
+			cpu.segExpand.gs = pm.segExpand.gs
+		end
+		if pm.segUpper then
+			cpu.segUpper.es = pm.segUpper.es
+			cpu.segUpper.ds = pm.segUpper.ds
+			cpu.segUpper.ss = pm.segUpper.ss
+			cpu.segUpper.fs = pm.segUpper.fs
+			cpu.segUpper.gs = pm.segUpper.gs
+		end
 		cpu.gdtr = pm.gdtr
 		cpu.ldtr = pm.ldtr
 		cpu.ldtrBase = pm.ldtrBase
