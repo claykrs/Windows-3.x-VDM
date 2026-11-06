@@ -298,6 +298,38 @@ const machine = Vdm.Machine.new({
 		print("[Vdm] " .. message)
 	end,
 })
+-- Automation/debug surface (Studio MCP probes): never used by the UI.
+-- _G is per script context in Studio, so the machine is shared through a
+-- BindableFunction: Invoke("mouse", x, y), Invoke("sync"), Invoke("state").
+const machineBridge = cleaner:Add(Instance.new("BindableFunction"))
+machineBridge.Name = "VdmMachineBridge"
+machineBridge.OnInvoke = function(command: string, a: number?, b: number?)
+	if command == "mouse" then
+		machine:setMouse(a or 0, b or 0, machine.mouseButtons)
+		return true
+	elseif command == "sync" then
+		return machine:syncMouse()
+	elseif command == "click" then
+		machine:setMouse(machine.mouseX, machine.mouseY, 1)
+		task.wait(0.1)
+		machine:setMouse(machine.mouseX, machine.mouseY, 0)
+		return true
+	end
+	return {
+		mouseX = machine.mouseX,
+		mouseY = machine.mouseY,
+		buttons = machine.mouseButtons,
+		ps2 = machine.mousePs2Enabled,
+		packets = #machine.mousePackets,
+		mickeyX = machine.mouseMickeyX,
+		mickeyY = machine.mouseMickeyY,
+		minX = machine.mouseMinX,
+		minY = machine.mouseMinY,
+		maxX = machine.mouseMaxX,
+		maxY = machine.mouseMaxY,
+	}
+end
+machineBridge.Parent = playerGui
 if BOOT_WINDOWS then
 	const WinBoot = require(Fixtures:WaitForChild("WinBoot"))
 	const DriversA = require(Fixtures:WaitForChild("WinBootDriversA"))
