@@ -57,28 +57,16 @@ passes with 667 assertions.
   `(limit, upper]`, and PM↔RM state saves it. (The faulting selector turned
   out to be expand-UP, but KRNL286 uses expand-down ring-3 segments later —
   decode the access byte's type field: bit2 = direction, not the DPL.)
-- **Next:** ensure the kernel never runs its heap walk inside an A20-off
-  window. Two candidate fixes: (a) model XMS *local* disable as scoped to
-  the RM callback invocation — the PM kernel's accesses must not wrap while
-  WSWAP holds a local disable (this mirrors how real DOSX scopes the local
-  A20 to its real-mode callback); (b) make A20-off reads of HMA-resident PM
-  objects fail loudly instead of reading wrapped low memory. Then re-run the
-  probe: the heap walk should proceed and the next kernel milestone is
-  visible from the INT21 tail trace and the load ring.
-- **R9 structural finding (`p31_r9e.log`, full LDT scan at fault):** the
-  kernel maps its HMA-resident global heap through 64 KiB window selectors —
-  LDT entries 0x62..0x71 are `base=(n)0BAD, limit=~0x10000-offset`
-  (entry 0x62, selector 0x314: base `0x10FA10` limit `0xFFFF` — the first
-  window), while entry 0x7E (selector 0x3F4) is the small heap-header
-  selector `{base 0x10FA10, limit 0x5AF}`, created once by DOSX's RM code at
-  step 14k (`50AB:0093`) and never rewritten. The faulting walk
-  (`add bx,es:[22h]; test byte es:[bx+4],2; mov ax,es:[bx+8]` at
-  `02EF:6CC6..6CD6` — the GlobalAlloc free-list scan) loaded the *header*
-  selector `0x3F4|3` where a *window* selector (`0x314|3`) was needed, so
-  the access at offset `0xF4D0` overran the 0x5AF limit. Next: statically
-  disassemble KRNL286's selector derivation for this loop (the kernel is on
-  disk; capstone works — see `media/win31/dis_krnl.py`) and find whether the
-  kernel computes `0x3F4` from a table we filled differently, or whether a
+- **Next (superseded):** the A20-window fixes (a)/(b) below were the plan
+  when the fault looked A20-driven; the closed R9 question and the overlap
+  finding show the final fault runs entirely with `a20=true`, so the A20
+  scoping work is parked until a fault actually shows wrapped access.
+  Earlier candidate fixes kept for reference: (a) model XMS *local* disable
+  as scoped to the RM callback invocation — the PM kernel's accesses must
+  not wrap while WSWAP holds a local disable (this mirrors how real DOSX
+  scopes the local A20 to its real-mode callback); (b) make A20-off reads
+  of HMA-resident PM objects fail loudly instead of reading wrapped low
+  memory.
 - **R9 final state (`p31_r9c.log`/`p31_r9g.log`, the write-spy closed the
   case):** the heap "corruption" is the kernel's own initialization.
   KRNL286 at `02EF:B319` (step 138k) fills the global-heap header and free
@@ -96,6 +84,72 @@ passes with 667 assertions.
   `EB 43 90 58 57`, next to the "SMARTAAR" strings) and trace the limit's
   register source; fix the query and the whole walk should proceed.
   Everything up to this point is committed and pushed (`b1c417d`).
+- **R9 QUESTION CLOSED (`p31_r9h`..`p31_r9x.log`, 2026-11-06): the 0x5AF
+  limit is NOT a query answer and DOSX never builds it.** Two premises of
+  the previous state were wrong:
+  1. The `SPY writer code: ... EB 43 90 58 57 ... SMARTAAR` dump fired on
+     the probe's own step-0 `write16(0x10FA10, 0xBEEF)` with the CPU still
+     at its initial `1000:0100`, so it dumped preloaded bytes at physical
+     `0x10100` — nothing to do with DOSX (the probe now prints
+     `[cs=... ip=... base=... cb=... step=... kind=... addr=...]` on that
+     line so it cannot be misattributed again). At step 14000,
+     `cs=50AB ip=0093` is the **EXEPACK stub copy** (load segment 0x340D;
+     the stub self-copies to `load+0x1C9E` = 0x50AB) unpacking DOSX, and the
+     8 writes to `0x40040..47` are the unpacked image's last bytes, not a
+     descriptor build.
+  2. The `{base 0x10FA10, limit 0x5AF, access 0xF3}` descriptor is written
+     by **KRNL286 itself** through the internal DPMI handler: `INT 31h
+     AX=000C` (Set Descriptor) lands in `02EF:279F`, whose `al=0Ch` branch
+     copies an 8-byte descriptor from `ES:DI` to the LDT (`02EF:27C1..27E5`).
+     The caller built `{limit 0x5AF, base 0x10FA10, acc F3}` on its stack
+     (es=ss=0x27F, di=0x13E) and set **selector 0x3F4 = the kernel's own
+     initial data-segment/module-database block (0x5B0 bytes)** at step
+     ~138k. All descriptor traffic into the live LDT (base 0x3EFC50) is now
+     visible via the probe's `DPMISET`/`SELBUILD`/`LDTW`/`LDTCP` hooks.
+- **New R9 frontier (`p31_r9t`/`p31_r9u`/`p31_r9x.log`): overlapping
+  allocation wipes the module database.** The full sequence at fault:
+  1. ~138k: kernel allocates the database block 0x5B0 @`0x10FA10`
+     (selector 0x3F4) and initializes it — NE-header copy (0x40 bytes,
+     copied by `02EF:B317` from the parsed header at ds=0x397) plus
+     `[0x1c]=4` entries and `[0x22]=0x40` table base (`02EF:B319`).
+  2. 112k-114k: the kernel also writes database fields into the **DOS-load
+     image** through alias ds=0x2F7 (base 0x8FDB0): `02EF:B524 mov [0x30],bx`
+     writes `0x2E7` (the eventual handle-table capacity) and `02EF:B5A4 mov
+     es:[0x32],ax` writes `0x9B` at image+0x30/0x32 — i.e. record fields at
+     image+0x30 = record[0x1c] if the record head sits at image+0x14.
+     The record *head* is never written into the image (fill stays).
+  3. 144k: the loader learns seg1's real size (`cx=0xB6CB` — the NE data
+     segment is 0xB6CB bytes at file 0x1620, seg table unit 16), creates
+     selector 0x314 = `{base 0x10FA10, limit 0xFFFF}` via `02EF:22E8..22FD`
+     — **the same base as the database block** — then `02EF:729A` moves
+     0xB6CA bytes from `02EF:0` (the raw DOS-load image, whose first 0x30
+     bytes are `CC F4` fill) into `0x317:0`, **wiping the initialized
+     database header** (`[0x1c]`: 4 → 0xF4CC, `[0x22]`: 0x40 → 0xF4CC).
+  4. The loader's handle-table walk (`02EF:6C9A..6CD2`, `mov es,[bp+12h]`
+     = the stale selector 0x3F7, limit 0x5AF) then reads `[0x22]=0xF4CC`,
+     computes offset 0xF4CC, and faults on the 0x5AF limit. Every HDR-trace
+     access in the final run had `a20=true` — the R9c A20-wrap theory is
+     not involved in this fault.
+  **Next concrete question:** why does the grow/re-home hand the kernel the
+  same block (`0x10FA10`) that already holds the module database — the
+  block lives inside DOSX's HMA data segment (`sel 0x79 = {0x101030,
+  0xEFAF}`), so the DOSX PM allocator (guest code) sub-allocating that pool
+  handed out overlapping blocks. Trace the DOSX allocator's free list at
+  138k/144k and the pool geometry it derived at boot (HMA claim via XMS
+  AH=01, XMS AH=08 answers, DOS HMA sub-allocation); on real hardware the
+  walk works because `[0x22]=0x40` and `cx=1` gives offset 0x44, inside the
+  0x5AF limit — the wipe is the only reason it faults.
+- **Probe hooks for this area** (`media/win31/probe31.lua`, all under
+  `--trace-dosxrm 1`, which must NOT be the last argv token — `argValue`
+  needs a following value): `DPMISET` (every internal Set Descriptor with
+  the source descriptor bytes and caller), `SELBUILD` (02EF:1ECB entries
+  with caller return address; `BX=03F4` also dumps 40 stack words),
+  `LDTW`/`LDTCP` (writes into LDT entries ≥0x5E, incl. entry 0x62 at
+  0x3EFF60), `TPL`/`DRV` (template-region watch + derivation trace),
+  `HDR` (reads+writes of `0x10FA00..0x10FA40` with a20 state), `IMG`
+  (writes to the image head `0x8FDB0..0x8FDF0`), plus XMS `EDD` decoding on
+  AH=0Bh lines, and `--dump-pm 1` now dumps raw LDT bytes `0x3EFF40..0x3EF9F`
+  at fault.
 - Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
   unhandled-but-non-fatal probe on this path.
 - Studio note: after a Studio reopen the instance id changes; the deploy
