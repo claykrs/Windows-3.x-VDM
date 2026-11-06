@@ -9,6 +9,28 @@ first ring-3→ring-0 call gate, IDT-delivered INT3, the compact real-callback
 IDT selection and the clear-PE switch helper, and `lune run tools/check.lua`
 passes with 667 assertions.
 
+## Current state (2026-11-06, R8)
+
+- Mouse proven end-to-end in a live Studio boot: bridge-driven absolute
+  targets map 1:1 in X and +58 px constant in Y (five-point affine fit,
+  slope exactly 1.0; packets drain under 0.5 s, so there is no delivery
+  stall). The bias lives inside the guest driver, not the host sink — it
+  survived changing the sink geometry. The client compensates through
+  `MOUSE_DRV_Y_BIAS = 58` in `Emulator.client.lua`; with it, a synthetic
+  click at the OK button dismisses Tetris' About dialog, and the rendered
+  arrow coincides with the host pointer. Calibration driver:
+  `tools/out/driver.py` (git-ignored).
+- Win 3.1 R8 probe (`tools/out/p31_r8.log`, 150M steps, `--xms`): WSWAP.EXE
+  and DOSX.EXE EXEC cleanly from `C:\WINDOWS\SYSTEM`, then KRNL286.EXE
+  (71730 bytes) EXECs and keeps executing in protected mode (PE=1, PC
+  advancing, no fault, no DOS call since EXEC; screen still DOS text).
+  `INT 16h AH=6F` is an unhandled-but-non-fatal probe on this path. Next:
+  instrument the PM loop around CS=02EF to see what KRNL286 waits on.
+- Studio note: after a Studio reopen the instance id changes; the deploy
+  tools' default `STUDIO_ID` must match the live instance (both
+  `tools/studioDeploy.lua` and `tools/studio_deploy.lua` are updated; the
+  duplicate should be reconciled to one file).
+
 ## Current state (2026-11-03, R7)
 
 - `main` is one clean commit (`windows 3.0a in roblox`); the old graph lives

@@ -30,6 +30,12 @@ const TITLE_HEIGHT = Theme.Sizes.TitleBar
 const STATUS_HEIGHT = Theme.Sizes.StatusBar
 const MIN_WINDOW_SCALE = 1
 const MAX_WINDOW_SCALE = 3
+-- Measured against MOUSE.DRV 3.0's PS/2 path at 640x480x16 (2026-11-06, five
+-- point affine fit, slope 1.0): the rendered guest arrow sits exactly 58 px
+-- below the tracked cursor position after an anchor, in every guest state we
+-- can observe. The driver is real guest code, so the host compensates here:
+-- injecting y - 58 makes the rendered arrow coincide with the host pointer.
+const MOUSE_DRV_Y_BIAS = 58
 
 const cleaner = Cleaner.new()
 
@@ -596,7 +602,7 @@ local function updateMouse(position: Vector2?)
 	end
 	const guestX = math.clamp(math.floor(fx * vgaSink.width), 0, vgaSink.width - 1)
 	const guestY = math.clamp(math.floor(fy * vgaSink.height), 0, vgaSink.height - 1)
-	machine:setMouse(guestX, guestY, mouseButtons)
+	machine:setMouse(guestX, guestY - MOUSE_DRV_Y_BIAS, mouseButtons)
 	if window.Gui then
 		window.Gui:SetAttribute("VdmPointerInside", true)
 		window.Gui:SetAttribute("VdmWindowHover", overWindow)
