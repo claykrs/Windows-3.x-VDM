@@ -36,13 +36,35 @@ passes with 667 assertions.
   the last argv token silently no-ops (`argValue` needs a following token),
   and the fake-XMS stub path fails WIN.COM's HIMEM validation ("Invalid
   HIMEM.SYS") — the no-`--xms` boot is the productive one.
-- New R8 frontier (`tools/out/p31_r8t.log`): with the fix the kernel executes
-  real PM code past the swap handoff and faults with a genuine guest-visible
-  `#GP`: `es selector 03F7 (LDT, index 0x7E) offset F4D0 exceeds limit 05AF`
-  at step 144k, called from KRNL286 code at `02EF:3322`/`6CD6`. Next: trace
-  where the kernel obtained selector `0x03F7` (LDT entry beyond limit — a
-  wrong or truncated LDT entry, or a fixup that did not apply) and why it
-  dereferences offset `0xF4D0`.
+- New R8 frontier (`tools/out/p31_r8t.log` → `p31_r9c.log`): with the XMS fix
+  the kernel executes real PM code past the swap handoff. The current fault:
+  KRNL286 walks its **global heap** (linked list, head at `es:[0x22]`, node
+  link/flag at `+4`/`+8`) through ring-3 LDT selector `0x03F7`
+  (base `0x10FA10` in the HMA, limit `0x5AF`) and reaches node offset
+  `0xF4CC` — far past the limit — so `linear()` raises `#GP`.
+- **Proven (`p31_r9c.log`): the heap bytes were never corrupted.** Step-0
+  snapshot shows the region zeroed, the write-spy (armed from step 0, window
+  `0x10FA00-0x10FA60`, all write paths covered) sees only the kernel's own
+  writes at `0x10FA00-0x0E` below the heap base, and A20 is ON at the fault.
+  The `0xF4CC` in BX came from a read made **while A20 was off**: WSWAP
+  toggles local A20 (XMS AH=05/06 pairs, ~6000 steps apart) around its swap
+  loop, and a heap read during a disable window wrapped `0x10FAxx` to
+  `0x0FAxx` (low-memory garbage, `CC F4` bytes = INT3/HLT pairs from the
+  stub region at segment `0x0FA1`). The kernel retained the garbage in BX
+  and faulted after A20 was re-enabled.
+- **Expand-down data segments are implemented and committed** (`4a1afe1`):
+  the direction bit is tracked per segment register, `linear()` validates
+  `(limit, upper]`, and PM↔RM state saves it. (The faulting selector turned
+  out to be expand-UP, but KRNL286 uses expand-down ring-3 segments later —
+  decode the access byte's type field: bit2 = direction, not the DPL.)
+- **Next:** ensure the kernel never runs its heap walk inside an A20-off
+  window. Two candidate fixes: (a) model XMS *local* disable as scoped to
+  the RM callback invocation — the PM kernel's accesses must not wrap while
+  WSWAP holds a local disable (this mirrors how real DOSX scopes the local
+  A20 to its real-mode callback); (b) make A20-off reads of HMA-resident PM
+  objects fail loudly instead of reading wrapped low memory. Then re-run the
+  probe: the heap walk should proceed and the next kernel milestone is
+  visible from the INT21 tail trace and the load ring.
 - Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
   unhandled-but-non-fatal probe on this path.
 - Studio note: after a Studio reopen the instance id changes; the deploy
