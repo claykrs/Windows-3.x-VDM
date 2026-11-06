@@ -119,20 +119,30 @@ end
 local function allocate(self: Xms, bytes: number): (number?, number?)
 	local cursor = EXT_START
 	const memSize = self.machine.mem.size
+	local gaps: { Block } = {}
 	for _, block in ipairs(freeList(self)) do
-		if block.start - cursor >= bytes then
-			const handle = self.nextHandle
-			self.nextHandle += 1
-			self.blocks[handle] = { start = cursor, size = bytes }
-			return handle, cursor
+		if block.start - cursor > 0 then
+			gaps[#gaps + 1] = { start = cursor, size = block.start - cursor }
 		end
 		cursor = block.start + block.size
 	end
-	if memSize - cursor >= bytes then
-		const handle = self.nextHandle
-		self.nextHandle += 1
-		self.blocks[handle] = { start = cursor, size = bytes }
-		return handle, cursor
+	if memSize - cursor > 0 then
+		gaps[#gaps + 1] = { start = cursor, size = memSize - cursor }
+	end
+	-- Highest gap first. DOSX standard mode locks its hold and places the PM
+	-- image at the very bottom of extended memory (image at start + 0x920 on a
+	-- 4 MiB machine); once that hold is released at the kernel handoff, a
+	-- low-first allocator would hand WSWAP's swap block the same bytes and
+	-- zero the PM code, sending the kernel marching into zeros.
+	for index = #gaps, 1, -1 do
+		const gap = gaps[index]
+		if gap.size >= bytes then
+			const start = gap.start + gap.size - bytes
+			const handle = self.nextHandle
+			self.nextHandle += 1
+			self.blocks[handle] = { start = start, size = bytes }
+			return handle, start
+		end
 	end
 	return nil, nil
 end

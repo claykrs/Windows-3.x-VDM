@@ -973,6 +973,11 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 
 	const isMZ = string.byte(data, 1) == 0x4D and string.byte(data, 2) == 0x5A
 	const buf = buffer.fromstring(data)
+	-- XMS ownership handoff: DOSX claims all extended memory while it relocates
+	-- its PM image, and releases the hold when the kernel EXEC happens (real
+	-- DOSX frees before WSWAP allocates its swap block). Without this the
+	-- kernel's swap allocations fail; with low-first allocation they used to
+	-- land on the PM image instead (now top-first in Xms.allocate).
 	if machine.xms then
 		machine.xms:releaseAll()
 	end

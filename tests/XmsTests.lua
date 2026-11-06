@@ -157,7 +157,8 @@ T("xms_emb_move_segment_offset", {
 		expect(handle ~= 0, "handle")
 		dispatch(m, 0x0C, handle)
 		expect(cpu.r[1] == 1, "lock status")
-		expect(cpu.r[4] == 0 and cpu.r[3] == 0x11, "lock linear address")
+		-- top-first allocation: a 64 KiB block starts 64 KiB below the top
+		expect(cpu.r[4] == 0 and cpu.r[3] == 0x3F, "lock linear address")
 		-- move 4 bytes from 0600:0400 to EMB offset 0
 		m.mem:write16(0x6300, 4)
 		m.mem:write16(0x6302, 0)
