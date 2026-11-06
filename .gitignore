@@ -1,0 +1,56 @@
+# copyrighted media -- never commit
+media/
+fixtures/WinBoot*.lua
+
+# host tooling binaries
+tools/bin/
+
+# generated import models (tools/build_rbxmx.lua / rojo build)
+Vdm.rbxmx
+Vdm.rbxm
+Vdm-demo.rbxlx
+Vdm-demo.rbxl
+DosMachine.rbxmx
+
+# generated Studio deploy payload (tools/studio_deploy.lua)
+tools/deploy_args.json
+
+# generated VGA test images
+tools/vga_test*.ppm
+
+# emulator memory dumps from diagnostic tools
+tools/memdump.bin
+tools/dump_*
+tools/*.bin
+tools/mcp_schema.mjs
+tools/probe_*
+tools/studio_*.json
+tools/analysis/dis16.py
+tools/analysis/disasm_import.py
+tools/analysis/kernel_ref.py
+tools/analysis/user_ref.py
+
+# Python analysis caches
+__pycache__/
+*.pyc
+
+# release media archive
+win30a-media.zip
+
+*.log
+tools/capture*.png
+tools/cap_raw.txt
+tools/mcp_result.json
+tools/play.json
+tools/stop.json
+tools/console.json
+tools/vdmcheck.json
+tools/treecheck.json
+tools/bootlog.json
+tools/probeattr.json
+tools/findgui.json
+tools/cal*.json
+tools/cal*.png
+tools/machprobe.json
+tools/raw_console.txt
+tools/test_conn.json
