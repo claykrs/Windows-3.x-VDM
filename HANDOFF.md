@@ -79,7 +79,23 @@ passes with 667 assertions.
   disassemble KRNL286's selector derivation for this loop (the kernel is on
   disk; capstone works — see `media/win31/dis_krnl.py`) and find whether the
   kernel computes `0x3F4` from a table we filled differently, or whether a
-  selector-growth step (AllocAlias / SetSelectorLimit equivalent) never ran.
+- **R9 final state (`p31_r9c.log`/`p31_r9g.log`, the write-spy closed the
+  case):** the heap "corruption" is the kernel's own initialization.
+  KRNL286 at `02EF:B319` (step 138k) fills the global-heap header and free
+  chain (`0x10FA10+`, word `0xF4CC` markers) through a window selector, and
+  the faulting walk (`GlobalAlloc` free-list scan, `02EF:6CC6..6CD6`,
+  `mov es,[bp+12h]` = a caller-supplied selector) reads the header's table
+  base `0xF4CC` and walks past the **header selector's limit**. The limit
+  was written once by DOSX's RM code (`50AB:0093`, step 14k) as
+  `{base 0x10FA10, limit 0x5AF, access 0xF3}` and never rewritten — while
+  the kernel initializes a ~64 KiB table. So the real question is now
+  narrow: **why did DOSX size the heap-header selector at 0x5AF** — the
+  limit comes from a value DOSX computed at creation time, likely from a
+  query we answer differently (HMA free size / XMS free / DOS memory size).
+  Disassemble the `50AB:0093` descriptor-build path (the write follows
+  `EB 43 90 58 57`, next to the "SMARTAAR" strings) and trace the limit's
+  register source; fix the query and the whole walk should proceed.
+  Everything up to this point is committed and pushed (`b1c417d`).
 - Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
   unhandled-but-non-fatal probe on this path.
 - Studio note: after a Studio reopen the instance id changes; the deploy
