@@ -7,7 +7,7 @@ with a single visible cursor, PC speaker output is wired, Windows 3.1's WIN.CNF
 now reaches DOSX, enters protected mode, completes the ring-3 handoff, the
 first ring-3→ring-0 call gate, IDT-delivered INT3, the compact real-callback
 IDT selection and the clear-PE switch helper, and `lune run tools/check.lua`
-passes with 661 assertions.
+passes with 667 assertions.
 
 ## Current state (2026-11-03, R7)
 

@@ -49,3 +49,8 @@ tools/treecheck.json
 tools/bootlog.json
 tools/probeattr.json
 tools/findgui.json
+tools/cal*.json
+tools/cal*.png
+tools/machprobe.json
+tools/raw_console.txt
+tools/test_conn.json
