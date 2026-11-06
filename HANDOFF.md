@@ -65,6 +65,21 @@ passes with 667 assertions.
   objects fail loudly instead of reading wrapped low memory. Then re-run the
   probe: the heap walk should proceed and the next kernel milestone is
   visible from the INT21 tail trace and the load ring.
+- **R9 structural finding (`p31_r9e.log`, full LDT scan at fault):** the
+  kernel maps its HMA-resident global heap through 64 KiB window selectors —
+  LDT entries 0x62..0x71 are `base=(n)0BAD, limit=~0x10000-offset`
+  (entry 0x62, selector 0x314: base `0x10FA10` limit `0xFFFF` — the first
+  window), while entry 0x7E (selector 0x3F4) is the small heap-header
+  selector `{base 0x10FA10, limit 0x5AF}`, created once by DOSX's RM code at
+  step 14k (`50AB:0093`) and never rewritten. The faulting walk
+  (`add bx,es:[22h]; test byte es:[bx+4],2; mov ax,es:[bx+8]` at
+  `02EF:6CC6..6CD6` — the GlobalAlloc free-list scan) loaded the *header*
+  selector `0x3F4|3` where a *window* selector (`0x314|3`) was needed, so
+  the access at offset `0xF4D0` overran the 0x5AF limit. Next: statically
+  disassemble KRNL286's selector derivation for this loop (the kernel is on
+  disk; capstone works — see `media/win31/dis_krnl.py`) and find whether the
+  kernel computes `0x3F4` from a table we filled differently, or whether a
+  selector-growth step (AllocAlias / SetSelectorLimit equivalent) never ran.
 - Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
   unhandled-but-non-fatal probe on this path.
 - Studio note: after a Studio reopen the instance id changes; the deploy
