@@ -1,5 +1,7 @@
 # RVDM — Windows 3.0a in a Roblox window
 
+[![CI](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/Windows-3.x-VDM) ![License](https://img.shields.io/badge/license-MIT-blue)
+
 RVDM is an 8086 real-mode PC emulator written in Luau that boots the real
 Microsoft Windows 3.0a binaries inside Roblox. `WIN.COM` loads `KERNEL.EXE`,
 the drivers and fonts, then `GDI.EXE` and `USER.EXE`, and the real Program
@@ -172,20 +174,27 @@ Application compatibility is verified with the harness and documented in
 The 286 protected-mode track (real `DOSX.EXE` + `KRNL286.EXE`) is actively
 being finished. Where it stands:
 
-- **Done:** the PM core (GDT/LDT/IDT/TSS, ring transitions, PM↔RM switching
-  with full state save/restore), the XMS driver, and the boot chain —
-  `WIN.COM` EXECs WSWAP and DOSX cleanly, DOSX claims extended memory,
-  relocates its PM image, and KRNL286 executes in protected mode.
-- **Just fixed:** the boot's silent stall was the CPU executing zeroed memory.
-  Root cause: the kernel EXEC's XMS ownership handoff orphaned DOSX's PM
-  image, and WSWAP's swap-block allocation (low-first) landed on the same
-  bytes and zeroed the code. Allocation is now top-first and the handoff is
-  pinned by tests (`3836f1f`).
-- **Being finished now:** the kernel's first protected-mode fault — a `#GP`
-  on an LDT selector (`es=03F7`, offset `0xF4D0` beyond limit `0x5AF`) at
-  step ~144k. Tracing that selector's provenance (a wrong or truncated LDT
-  entry, or a fixup that did not apply) is the current frontier; after it,
-  the kernel continues PM initialization toward USER/GDI 3.1.
+- **Done:** the PM core (GDT/LDT/IDT/TSS, expand-down data segments, ring
+  transitions, PM↔RM switching with full state save/restore), the XMS driver
+  (top-first allocation), and the boot chain — `WIN.COM` EXECs WSWAP and
+  DOSX cleanly, DOSX claims extended memory, relocates its PM image, and
+  KRNL286 executes in protected mode.
+- **Just fixed (R9):** the kernel's first protected-mode fault — a `#GP`
+  in the GlobalAlloc heap walk at step ~144k — is root-caused and solved
+  (`6557b2e`). Our CPU's `LAR`/`LSL` inverted the ZF semantics, so
+  KRNL286's selector-validation path (`lar ax,sel / jne`) mis-resolved
+  seg1's home block and a 0xB6CB-byte move wiped the kernel heap header.
+  With Intel-correct flags the boot now loads KRNL286's segments fault-free
+  through step ~162k.
+- **Being finished now (R10):** after KRNL286 initialization the boot
+  returns to real mode at `0x0C9B` and wild-far-returns into the BIOS area
+  (`FFFF:10FD`). Tracing the callback/dispatch path that real DOSX uses
+  there is the current frontier; after it, the kernel continues toward
+  USER/GDI 3.1.
+
+Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
+[docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
+targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
 
 Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
 [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
