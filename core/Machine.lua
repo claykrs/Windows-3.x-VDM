@@ -802,22 +802,69 @@ function Machine.dosReserve(self: Machine, start: number, paras: number): boolea
 		return false
 	end
 	const endSeg = start + paras
+	if endSeg > self.arenaTop then
+		return false
+	end
+	-- validate the whole region first: the reservation must not touch an
+	-- owned block, and no list mutation may happen before a failure is known
 	local j = index + 1
-	while j <= #blocks and blocks[j].start < endSeg do
-		const block = blocks[j]
-		const blockEnd = block.start + block.size
-		if block.owner ~= 0 then
+	while j <= #blocks and blocks[j].start <= endSeg do
+		if blocks[j].owner ~= 0 then
 			return false
 		end
+		j += 1
+	end
+	local extra = 0
+	j = index + 1
+	while j <= #blocks and blocks[j].start <= endSeg do
+		const block = blocks[j]
+		const blockEnd = block.start + block.size
+		if block.start == endSeg then
+			-- the reservation ends exactly where this block starts, so its MCB
+			-- paragraph (at endSeg - 1) fell inside the reserved region: give
+			-- the block a new MCB paragraph at endSeg like a DOS grow would
+			if block.size >= 2 then
+				block.start = endSeg + 1
+				block.size -= 1
+			else
+				-- a one-paragraph block has nowhere to re-home: absorb its
+				-- paragraph into the reservation to keep the chain unbroken
+				table.remove(blocks, j)
+				extra = 1
+			end
+			break
+		end
 		if blockEnd > endSeg then
-			block.size = blockEnd - (endSeg + 1)
-			block.start = endSeg + 1
+			if blockEnd > endSeg + 1 then
+				-- keep the free tail beyond the reserved region; its MCB
+				-- paragraph sits at endSeg and stays owned by the chain
+				block.size = blockEnd - (endSeg + 1)
+				block.start = endSeg + 1
+			else
+				table.remove(blocks, j)
+			end
 			break
 		end
 		table.remove(blocks, j)
 	end
-	blocks[index].size = paras
+	local oldSize = blocks[index].size
+	blocks[index].size = paras + extra
 	blocks[index].owner = self.dosOwner
+	if oldSize > paras + 1 then
+		-- the block was larger than the reservation: carve the leftover back
+		-- out as a free block (its MCB paragraph sits at endSeg)
+		local tail = { start = endSeg + 1, size = oldSize - paras - 1, owner = 0 }
+		table.insert(blocks, index + 1, tail)
+		local after = blocks[index + 2]
+		if after and after.owner == 0 then
+			tail.size += after.size + 1
+			table.remove(blocks, index + 2)
+		end
+	elseif oldSize == paras + 1 then
+		-- only the tail MCB paragraph was extra: hand it to the reservation so
+		-- no unchained paragraph is left between the block and its neighbour
+		blocks[index].size = paras + 1
+	end
 	self:syncArena()
 	return true
 end
@@ -834,7 +881,9 @@ function Machine.dosSetOwner(self: Machine, seg: number, owner: number): boolean
 	return false
 end
 
--- free a block by base segment (merges with adjacent free neighbours)
+-- free a block by base segment (merges with adjacent free neighbours). The
+-- merged run must absorb the neighbour's MCB paragraph too: the walk rule
+-- next = start + size + 1 only stays coherent when the sum includes it.
 function Machine.dosFree(self: Machine, seg: number): boolean
 	const blocks = self.memBlocks
 	for index, block in blocks do
@@ -842,12 +891,12 @@ function Machine.dosFree(self: Machine, seg: number): boolean
 			block.owner = 0
 			const next = blocks[index + 1]
 			if next and next.owner == 0 then
-				block.size += next.size
+				block.size += next.size + 1
 				table.remove(blocks, index + 1)
 			end
 			const previous = blocks[index - 1]
 			if previous and previous.owner == 0 then
-				previous.size += block.size
+				previous.size += block.size + 1
 				table.remove(blocks, index)
 			end
 			self:syncArena()

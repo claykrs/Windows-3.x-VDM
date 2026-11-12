@@ -7,7 +7,7 @@ with a single visible cursor, PC speaker output is wired, Windows 3.1's WIN.CNF
 now reaches DOSX, enters protected mode, completes the ring-3 handoff, the
 first ring-3→ring-0 call gate, IDT-delivered INT3, the compact real-callback
 IDT selection and the clear-PE switch helper, and `lune run tools/check.lua`
-passes with 667 assertions.
+passes with 924 assertions.
 
 ## Current state (2026-11-06, R8)
 
@@ -206,6 +206,55 @@ passes with 667 assertions.
   `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
   --steps 200000` (flag not last argv) — the int21 `48 req/4A seg` trace
   plus MACHINEEXIT at 0C9B:3652 is the failure signature.
+- **R10 SOLVED (arena coherence): three real bugs, all fixed.** The probe's
+  `-> 8` was AX=error-code-8 printed decimal, and `brk_avail` was BX; the real
+  damage was in the arena itself. Per-mutation arena dumps (probe31
+  `--dump-arena`, local-only) caught the exact mutations:
+  1. `dosFree` merge dropped the neighbour's MCB paragraph
+     (`size += next.size`); every alloc→free round lost one paragraph off the
+     chain, derailing the guest walk ("bad MCB id 0 at 0xfbe" in the stress).
+     Fix: merged runs absorb the neighbour MCB para (`+= next.size + 1`, and
+     `previous.size += block.size + 1`).
+  2. Dos `FN[0x4A]` grow set `next.size = spare - 1` — the grown block ate one
+     paragraph of the free neighbour, so the last MCB ended at 0x9FFF/0x9FFE/
+     0x9FFD instead of 0xA000 (three grows in the probe = three lost
+     paragraphs). Also: spare 0/-1 exact fits dropped the neighbour's MCB para
+     or left it unchained, and shrink never merged the freed tail into a
+     following free block (fragmentation: brk_avail 32749 instead of 36624).
+     Fix: `next.size = spare`; spare ≤ 0 hands the whole region over
+     (spare==0 → size+1); shrink remainder merges into a free neighbour.
+  3. `dosReserve` was not atomic: it consumed free blocks (`table.remove`)
+     and THEN failed on an owned block, leaving gaps a stale MCB bridges
+     (stress step 138: walk saw an extra MCB at 0x1200). It also mis-sized
+     zero-para remainders and mishandled reservations ending exactly on the
+     next block (swallowing its MCB paragraph) or a block larger than the
+     reservation (silently dropping the leftover). Fix: validate ownership
+     first, then apply; re-home the neighbour's MCB paragraph when endSeg
+     lands on it; carve the leftover free (merging) when the block was larger.
+  Tests: `tests/MachineTests.lua` now walks the guest-visible MCB chain in
+  emulated memory (id 0x4D/0x5A, next = seg+size+1, end == arenaTop, no
+  adjacent frees, walk-largest == dosLargest) after every mutation of a
+  240-step seeded alloc/free/resize/reserve stress, plus focused tests for
+  each bug; suite is 924 assertions.
+- **R10 probe outcome after the fix + new frontier (R11: terminate vs
+  continue).** The arena is coherent end-to-end (`end=A000` after every
+  mutation). The 0xFFFF probe now fails with the TRUE largest:
+  `48 req=65535 -> 8 cf=1 brk_avail=36624` (0x8F10 — the merged tail), and
+  every RM-phase alloc/resize succeeds at sane segments (wswap PSP 0x10F0,
+  KRNL286 PSP 0x1426, the 4096-para alloc at 0x30D6). The boot still ends at
+  0C9B:3652 — but that is NOT a memory failure. With `--dump-exit` the
+  executed bytes at CS:IP are `CD 20` and CS:IP = 0xC9B0+0x3650 = linear
+  0x10000 = **PSP:0000**: the DOSX/KRNL286 RM glue deliberately jumps to
+  PSP:0000 and executes the PSP's INT 20h terminator (the bytes just below
+  are the PSP block's own MCB, `4D 08 00 EF` = owner 8 size 239 — exactly the
+  post-shrink chain). In real Windows 3.1 standard mode the WIN.COM/DOSX DOS
+  process legitimately terminates once the PM kernel is up; the kernel keeps
+  running in PM and later reaches DOS only through DOSX's resident RM
+  callbacks. Our `defaultInts[0x20]`/`machine.exit` kill the whole machine
+  instead. Next step: model DOS-process terminate as "process over, machine
+  keeps running" for the 3.1 track (parent/child EXEC resume via INT 22h /
+  PSP:000A, or a PM-owns-the-boot flag), then the PM kernel should continue
+  past step 162k.
 
 ## Current state (2026-11-03, R7)
 

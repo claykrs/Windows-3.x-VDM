@@ -32,7 +32,7 @@ executing on the emulated CPU. The public repository is
 - PC speaker: the 8254 channel-2 divisor (ports 0x43/0x42) and the port 0x61
   gate are modelled; the host replays an optional short beep on state changes.
 - The gate `lune run tools/check.lua` passes: stylua, selene (luau + roblox),
-  `luau-analyze --mode=strict`, and 667 test assertions.
+  `luau-analyze --mode=strict`, and 924 test assertions.
 
 ![MS-DOS Executive listing the real c:\windows directory](docs/screenshots/r6-msdos-executive.png)
 
@@ -144,7 +144,7 @@ property of Microsoft; supply your own copy to run it.
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)): a stylua format
 check, selene lint over core/tools/tests plus a Roblox-config pass,
 `luau-analyze --mode=strict` over `core/`, and the test suite — currently
-667 assertions.
+924 assertions.
 
 ```powershell
 tools\bin\lune.exe run tools/check.lua

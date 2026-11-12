@@ -913,7 +913,8 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 	for index, block in machine.memBlocks do
 		if block.start == segment then
 			if block.size >= newSize then
-				-- shrink / same: carve the remainder into a free block
+				-- shrink / same: carve the remainder into a free block and
+				-- merge it with a following free block, like DOS does
 				if block.size >= newSize + 2 then
 					const rest = {
 						start = block.start + newSize + 1,
@@ -922,6 +923,11 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 					}
 					block.size = newSize
 					table.insert(machine.memBlocks, index + 1, rest)
+					const after = machine.memBlocks[index + 2]
+					if after and after.owner == 0 then
+						rest.size += after.size + 1
+						table.remove(machine.memBlocks, index + 2)
+					end
 					machine:syncArena()
 				end
 				ok(cpu)
@@ -930,11 +936,20 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 				const next = machine.memBlocks[index + 1]
 				if next and next.owner == 0 and block.size + 1 + next.size >= newSize then
 					const spare = next.size + block.size - newSize
-					block.size = newSize
-					if spare >= 2 then
+					if spare >= 1 then
+						block.size = newSize
 						next.start = block.start + newSize + 1
-						next.size = spare - 1
+						-- the neighbour keeps the paragraphs from its new MCB
+						-- paragraph through its old end: exactly `spare` of
+						-- them, or the chain ends one paragraph short of the
+						-- arena top
+						next.size = spare
 					else
+						-- the remainder is only the neighbour's MCB paragraph
+						-- (or nothing): DOS hands the whole region over
+						if spare == 0 then
+							block.size = newSize + 1
+						end
 						table.remove(machine.memBlocks, index + 1)
 					end
 					machine:syncArena()
