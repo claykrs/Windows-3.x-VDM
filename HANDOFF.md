@@ -188,6 +188,24 @@ passes with 667 assertions.
   tools' default `STUDIO_ID` must match the live instance (both
   `tools/studioDeploy.lua` and `tools/studio_deploy.lua` are updated; the
   duplicate should be reconciled to one file).
+- **R10 root-cause lead (arena probe):** the RM exit is a DOS memory failure,
+  not a callback bug. The probe's int21 trace shows the RM phase's final
+  sequence: `4A seg=0x1000 new=4112` → `48 req=4000 -> 8209 ok` →
+  `4A seg=0x1000 new=239` → `48 req=100 -> 2049 ok` → **`48 req=65535 -> 8
+  cf=1`** → resizes → `48 req=4096 -> 9031 ok` → exit. The guest probes
+  "largest free block" with a 0xFFFF-paragraph request, and its own MCB
+  chain walk answers **8 paragraphs** — yet the very next 4096-paragraph
+  alloc SUCCEEDS, so our internal memBlocks hold thousands free while the
+  MCB chain the guest reads is broken/fragmented. DOSX takes its
+  insufficient-memory path, far-returns on a stale stack (FFFF:10FD), and
+  exits with code 0. Fix target: MCB-chain coherence — verify every
+  alloc/resize/free keeps the guest-visible MCB walk consistent
+  (syncArena writes MCBs for blocks index>1 only; chain integrity means
+  next-MCB = start + size + 1 must line up after every mutation, and the
+  0x0800 MCB must match block 3). Reproduce with
+  `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
+  --steps 200000` (flag not last argv) — the int21 `48 req/4A seg` trace
+  plus MACHINEEXIT at 0C9B:3652 is the failure signature.
 
 ## Current state (2026-11-03, R7)
 
