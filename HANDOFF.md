@@ -130,15 +130,47 @@ passes with 667 assertions.
      computes offset 0xF4CC, and faults on the 0x5AF limit. Every HDR-trace
      access in the final run had `a20=true` — the R9c A20-wrap theory is
      not involved in this fault.
-  **Next concrete question:** why does the grow/re-home hand the kernel the
-  same block (`0x10FA10`) that already holds the module database — the
-  block lives inside DOSX's HMA data segment (`sel 0x79 = {0x101030,
-  0xEFAF}`), so the DOSX PM allocator (guest code) sub-allocating that pool
-  handed out overlapping blocks. Trace the DOSX allocator's free list at
-  138k/144k and the pool geometry it derived at boot (HMA claim via XMS
-  AH=01, XMS AH=08 answers, DOS HMA sub-allocation); on real hardware the
-  walk works because `[0x22]=0x40` and `cx=1` gives offset 0x44, inside the
-  0x5AF limit — the wipe is the only reason it faults.
+  **R9 SOLVED (`p31_r10*`/`p31_r11*.log`, 2026-11-12): our LAR/LSL set ZF
+  backwards.** The overlap was never an allocator bug — the whole
+  XMS/DOS-HMA suspect list was clean (the HMA pool chain in the DOSX data
+  segment is guest-managed and self-consistent; the kernel's own hi-heap
+  MCB chain spans `0x101040`..`0x10FFD0` with a free 0xE99-para node at
+  `0x101060`, and its GlobalAlloc deliberately last-fits the tail). The
+  real chain of events: seg1's record (`[si+8]`, at the DB table base
+  `[0x22]`=0x40) holds selector 0x0407 whose block `{base 0x54DB0, limit
+  0xB6CF}` is KRNL286's DGROUP home in DOS memory; the loader validates it
+  with `lar ax,sel / jne invalid` (`02EF:0ED7..0EDC`) and then resolves
+  the block's current home through the handle-table chain
+  (`0x21B1` = `ds=cs:[0x30]:[0x21a]` table at `0x50D82`,
+  slot `(sel & 0xF8)>>2`; `0x221F` follows node `[0xA]` links until one
+  equals the original selector; block-header windows like 0x3AF@0x54DA0
+  hold `[0xA]`=0x0407). With **correct** LAR semantics (`ZF=1` on success,
+  access byte in AH) `jne` is not taken, the chain resolves 0x0407, and
+  `229C(0x0407)` extends selector 0x0404's descriptor to `{0x54DB0,
+  0xFFFF, F3}` so the 0xB6CB-byte DGROUP move lands in DOS memory. Our
+  LAR/LSL inverted ZF (true on failure, false on success) and leaked
+  `flags&0xF0` into AL, so `jne` fired, `0xED1` returned the raw LAR value
+  (0xFB00), the fallback chain ended on the DB block, and `229C` extended
+  the DB selector 0x3F4 instead — moving seg1 ONTO the heap/DB header and
+  wiping `[0x22]` to 0xF4CC, which faulted the very next walk. The file's
+  own `CC F4` fill at seg1 start (verified in KRNL286.EXE at 0x1620) made
+  the wiped words look like "trap fill". Fix: `core/Cpu.lua` `larLsl` now
+  sets ZF=1 on success / 0 on failure and 16-bit LAR returns
+  `{AH=access, AL=0}`; `tests/PmCpuTests.lua` pins the Intel semantics.
+  Also fixed while auditing the suspect list: `core/Xms.lua` AH=08h now
+  returns AX=total/DX=largest and AH=88h AX=largest/DX=total per the XMS
+  spec (values are equal on the fresh 4 MiB pool, so DOSX never noticed).
+- **New R10 frontier (`p31_r11c.log`): boots to a real-mode wild return.**
+  With the fix the boot runs fault-free: the kernel loads its remaining
+  segments (seg2 runs at cs=0x0407 `{0x54DB0, 0xB6CF}`, seg3 at cs=0x040F
+  `{0x10CF50, 0x2AAF}` in extended memory), the DB walk reads `[0x22]=0x40`
+  intact, and at step 162529 the machine has flipped back to real mode
+  (CR0.PE=0) with CS=DS=ES=SS=0x0C9B and far-returns into `FFFF:10FD`
+  (ROM BIOS area), where an INT 20h/27h-class stub ends the boot with
+  `exit=0` (`MACHINEEXIT ... ret=FFFF:10FD`, ~18.5k steps past the old
+  fault). Next question: what is 0x0C9B (which real-mode phase) and why
+  does its return address point into the BIOS — a stale IVT/stack vector
+  on our side, or a guest phase we stubbed out?
 - **Probe hooks for this area** (`media/win31/probe31.lua`, all under
   `--trace-dosxrm 1`, which must NOT be the last argv token — `argValue`
   needs a following value): `DPMISET` (every internal Set Descriptor with

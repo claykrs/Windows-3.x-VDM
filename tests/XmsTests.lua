@@ -122,11 +122,14 @@ T("xms_query_free", {
 		fresh(m)
 	end,
 	check = function(m, cpu, expect)
+		-- AH=08h: AX = total free KB, DX = largest free block KB (XMS spec).
 		dispatch(m, 0x08)
-		expect(cpu.r[1] == 3008, "largest=" .. cpu.r[1])
-		expect(cpu.r[3] == 3008, "total=" .. cpu.r[3])
+		expect(cpu.r[1] == 3008, "total=" .. cpu.r[1])
+		expect(cpu.r[3] == 3008, "largest=" .. cpu.r[3])
+		-- AH=88h: AX = largest free block KB, DX = total free KB.
 		dispatch(m, 0x88)
-		expect(cpu.r[1] == 3072, "any=" .. cpu.r[1])
+		expect(cpu.r[1] == 3072, "any largest=" .. cpu.r[1])
+		expect(cpu.r[3] == 3072, "any total=" .. cpu.r[3])
 	end,
 })
 

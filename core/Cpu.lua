@@ -2504,12 +2504,18 @@ local function larLsl(cpu: any, isLar: boolean)
 	const selector = cpu:readRM16(e)
 	const desc = readDescriptor(cpu, selector)
 	if not desc then
-		cpu:setbits(ZF, true)
+		-- Intel semantics: ZF = 1 when the descriptor is valid and loaded,
+		-- ZF = 0 when the selector is invalid/out of bounds. KRNL286 gates its
+		-- selector-validation helper on `lar ax,sel / jne invalid`.
+		cpu:setbits(ZF, false)
 		return
 	end
 	local value
 	if isLar then
-		value = bor(lshift(desc.access, 8), band(desc.flags, 0xF0))
+		-- Access rights byte lands in AH; the low byte stays clear (the 286
+		-- exposes nothing below the access byte and a 16-bit 386 LAR masks
+		-- the granularity byte out).
+		value = lshift(desc.access, 8)
 	else
 		value = desc.limit
 	end
@@ -2518,7 +2524,7 @@ local function larLsl(cpu: any, isLar: boolean)
 	else
 		cpu:wr(e.reg, band(value, 0xFFFF))
 	end
-	cpu:setbits(ZF, false)
+	cpu:setbits(ZF, true)
 end
 
 local function movControl(cpu: any, op: number)

@@ -384,8 +384,10 @@ T("lar_lsl_gdt", {
 		m.mem:write8(0x700F, 0)
 	end,
 	check = function(_m, cpu, expect)
-		expect(not cpu:getF(64), "LAR did not find descriptor")
-		expect(cpu.r[1] == 0x9A40, "LAR rights=" .. string.format("%04X", cpu.r[1]))
+		-- Intel semantics: ZF = 1 when the descriptor is valid (LAR/LSL loaded),
+		-- ZF = 0 when invalid. KRNL286 gates on `lar ax,sel / jne invalid`.
+		expect(cpu:getF(64), "LAR did not find descriptor")
+		expect(cpu.r[1] == 0x9A00, "LAR rights=" .. string.format("%04X", cpu.r[1]))
 		expect(cpu.r[2] == 0xFFFF, "LSL limit=" .. string.format("%04X", cpu.r[2]))
 	end,
 })
