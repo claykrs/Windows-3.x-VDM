@@ -417,23 +417,49 @@ the real divergence is the KRNL286 EXEC block placement.** Verified this pass:
   slide walking through it), `--trace-alloc` (the 13BBF pool-base call at
   PM 02EF:B56D with retro).
 
-Next session (R12 part 3 continued): resolve the KRNL286 placement paradox —
-(a) trace the glue's KRNL286 load path (1861:00E9 AH=4B with
-DS:DX="C:\WINDOWS\SYSTEM\KRNL286.EXE", param block at 0x1436:0x2200) against
-the R10-era evidence of PSP 0x1426 — check whether DOSX's own EXEC parameter
-block or the glue's INT 21h interception should keep KRNL286 inside DOSX's
-block; (b) if the child EXEC is correct, find what keeps the straddle
-(0x199B0..0x1BBFC) out of the child's pool on real hardware — candidates:
-the DOSX glue's INT 2Fh handler (0x1861:0x97B) intercepting KRNL286's DOS
-calls, or the child PSP:02/derivation reading a smaller top-of-memory once
-maxalloc=0 is honored (our EXEC gives bound-NE children
-`math.max(minimumParas, dosLargest)` — inflating PSP:02 to 0xA000 vs the
-DOS-faithful 0x2B0B for maxalloc=0 — but note 3.0a KERNEL.EXE ALSO has
-maxalloc=0 and needs the big block, so any sizing fix must stay gated so the
-3.0a baseline keeps its arena); (c) alternatively verify whether the second
-PM re-entry's stub call target is supposed to be re-copied from staging
-0x2942 (which survives ABOVE the pool at 0x29420) — a resident-image
-self-repair the glue may perform on re-entry.
+**R12 part 3 second pass (2026-11-13): case 1 (MCB corruption) is DEAD —
+the shrink is applied correctly; the EXEC is AL=00 (a real child), and the
+162000 stub entry does NOT come from the INT22 resume.** Guest-visible MCB
+walk at the KRNL286 EXEC (probe `--trace-kexec`, walk head = LoL first-MCB
+0x0050, next = mcb+size+1):
+`0050:4D ow=0008 sz=07AF | 0800:4D ow=0008 sz=0064 | 0865:4D ow=10F0 sz=0040 |
+08A6:4D ow=1426 sz=0040 | 08E7:4D ow=0000 sz=06D7 | 0FBF:4D ow=0008 sz=003F |
+0FFF:4D ow=0008 sz=00EF | 10EF:4D ow=10F0 sz=0335 | 1425:4D ow=1426 sz=0575 |
+199B:5A ow=0000 sz=8664` — the DOSX block is exactly 0x575 paras
+(0x1426..0x199B), the image tail (0x199C..0x1BD5) sits in the FREE block, no
+carve-into-owned, chain coherent to 0xA000. The EXEC is AL=00 (param block
+env=0000/inherited, cmd=1436:1EFC, FCBs 1436:1F9C/1FCC, tail = one space) —
+not mode 3.
+**The INT22 trail is also clean**: our buildPSP sets every PSP's INT22 to
+`0000:<own PSP>` (the INT 20h at PSP:0000 convention — core/Executables.lua
+buildPSP lines `write16(base+0x0A, 0)` / `write16(base+0x0C, pspSeg)`), and
+the INT22W watcher saw no PSP INT22 ever rewritten to 0x5B:0x000A (the only
+0x199CA/0x199CC writes are the 44000 copy and the 14000 fill — false
+positives: those addresses are image bytes before the KRNL286 PSP exists).
+So the 162000 stub entry (0x5B:0x000A) came from the 0C9B glue's OWN
+published PM-entry target — the DOSX stub IS the published re-entry (its
+`mov ax,0x1436; ... call +0x2956` runs `or ax,ax` on the QEMM probe result
+every time), and the probe at image+0x2971 is clobbered at that point.
+
+Next session (R12 part 3 continued): the paradox is now pinned to one
+question — **on real hardware, what keeps the pool base (KRNL286 PSP+0x20)
+clear of the image tail (image_start+0x15B0..+0x35EC)?** Candidates in order:
+(a) KRNL286's PSP is NOT keep_end+1 on real hardware — the strongest
+evidence is the R10-era note `KRNL286 PSP 0x1426` (= DOSX's own PSP, pool at
+0x1446 = kept DGROUP, no collision) — trace what machine.pspSeg was during
+the R10-era KRNL286 phase and whether the core repointed it on the EXEC;
+(b) the pool base conversion is not PSP+0x20 when the environment differs —
+KRNL286 reads PSP:02h (top of memory) through the DPMI mode-switch ES at
+image C94D (`mov di,es:[2]` after `mov es,ax+0x10`), and our EXEC gives
+bound-NE children `math.max(minimumParas, dosLargest)` (PSP:02 = 0xA000 vs
+the DOS-faithful 0x2B0B for maxalloc=0) — gated, since 3.0a KERNEL.EXE also
+has maxalloc=0 and needs the big block; (c) the staging copy at 0x29420
+survives the pool (0x19BF0..0x1DC80 ends below it) — check whether the real
+second re-entry re-copies the resident image tail from staging before the
+stub's `call +0x2956` (no re-copy happens in our boot: IMGMAP at fault still
+ends at +0x175C). Useful traces added: `--trace-kexec` (MCB walk before/
+after EXEC, AL, param block, command tail, INT22 state), plus the earlier
+`--trace-1607/--trace-68/--trace-alloc`.
 
 
 ## Current state (2026-11-03, R7)
