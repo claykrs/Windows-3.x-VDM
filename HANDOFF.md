@@ -364,18 +364,76 @@ artifact. The full verified chain:
    `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
    --watch-imgw --steps 400000`.
 
-Next session (R12 part 3): make the phase-2 EMB switch happen — decide who
-should answer `INT 2Fh AX=1607h BX=0x14` (the DOSX hook chain expects the
-Windows-being-loaded response table in ES:SI; WIN.COM's stub-built INT 2Fh
-hook at WIN.COM:0x2A7 is the likely real answerer — dump what it builds at
-runtime), verify the copied table drives the 0x53:0x3BD6 EMB dispatch, and
-check whether the second PM re-entry (0C9B glue) then enters the EMB-based
-PM code instead of the resident stub. Alternative/adjacent leads: the INT 2Fh
-AX=1600h "Windows active" answer (KRNL286 sets [0x324] bit 0x21 when AL==3 —
-our core says "not installed", matching the 3.0a baseline but not the 3.1
-boot state), and the DPMI 0500/0501 free-block table loop at KRNL286 image
-C0F4 (never ran in our boot — the pool came from [0x5B4] = the 2-para DOS
-alloc at 0x19BE instead).
+**R12 part 3 (first pass, 2026-11-13): the "skipped EMB switch" framing was
+wrong — the phase-2 blocks are overlay-chain code OFF this boot's path, and
+the real divergence is the KRNL286 EXEC block placement.** Verified this pass:
+
+- **The INT 2Fh hook chain is healthy.** WIN.COM installs its hook at step
+  6000 (IVT 2Fh -> 0x1000:0x0E0C), re-hooks to 0x125E:0x05FE at 10000, and
+  DOSX's glue replaces it with 0x1861:0x097B at 44000 (image+0x2C9F:
+  `mov dx,0x97B; mov ax,0x252F; int 21h`). The AX=1605 install broadcast
+  fires (image+0x36, dx=1 di=0x30A) and returns CX=0, so the loader takes
+  the jcxz path — normal for a clean DOS box. The AX=1687 DPMI check
+  (KRNL286 image C8E7, PM 02EF:B4D0) is ANSWERED (ax==0, the DPMI entry
+  lcall at B50A runs, vendor API AX=168A at B584 with bx=0x19AC). Nothing
+  is wrong with the hook chain.
+- **The image+0x11E0 phase-2 block (INT 2Fh AX=1607h BX=0x14 -> 0x40-word
+  table copy -> call 0xa60 -> ljmp 0x53:0x3BD6) NEVER RUNS — and that is
+  correct.** There are two sibling switch blocks: image+0x11B0 (NetBIOS
+  INT 5Ch variant -> ljmp 0x53:0x3B07) and image+0x11E2 (1607/14 variant ->
+  ljmp 0x53:0x3BD6). The first-stage PM code (the 0x4330-byte copy at
+  EMB+0x920) holds pointers to them at PM offsets 0x3B03/0x3BD2 — they are
+  overlay-chain blocks CALLED BY the EMB-based PM code to load the next
+  stage, not part of phase 1. Also verified: INT 68h (the 0xF386
+  386-to-the-max host, gated by the [0x2f10] flag at resident+0x2F10) is
+  never hooked in a vanilla DOS 5+HIMEM boot — our skip path matches real
+  hardware; INT 68h is not the protection either.
+- **The geometric paradox is now PROVEN.** keep_end = image_start + 0x13A0
+  bytes (the glue's 0x13A constant, file-verified) — invariant in every
+  base variable. KRNL286's PSP = first-fit after the shrink = keep_end+1
+  (0x199C), and its pool base = PSP+0x20 (KRNL286 itself converts segments
+  0x19AC/0x19BC = PSP+0x10/+0x20 via DPMI AX=0002 at 02EF:27A3, and the
+  pool selector 0x277 is built for segment 0x19BC by the DOSX 0053 selector
+  services, retro-captured at the 13BBF call site PM 02EF:B56D — ax=0x277,
+  bx=0x19BC). Therefore the pool starts at image_start+0x15B0 bytes —
+  ALWAYS inside the 0x35EC-byte image. On real hardware the same guest math
+  forces the same collision, so one of the flow inputs must differ.
+- **The strongest lead: the R10-era boots ran KRNL286 at PSP 0x1426 —
+  DOSX's OWN PSP — while our boot EXECs KRNL286.EXE as a child (psp 0x199C,
+  EXECW step 112000).** With KRNL286 at PSP 0x1426 the pool base
+  (PSP+0x20 = 0x1446) lands in the KEPT DGROUP area and nothing collides.
+  Either the real glue load path differs (module-style load into DOSX's
+  own block vs our AH=4B child EXEC), or the R10-era `KRNL286 PSP 0x1426`
+  note reflected a core that didn't repoint machine.pspSeg on that EXEC.
+  No AH=48 fires after step 18000 in our boot (the FN[0x48] wrapper sees
+  all of them), so nothing reserves the straddle.
+- Probe additions: `--trace-1607` (INT1600/INT1607 sites + IVT2F write
+  tracer + L2F all-INT-2Fh log with nil-safe step hook — the hook must
+  guard `self.r`/`self.es` because the first step-0 invocation has sparse
+  fields, and `bx` in a new inner block resolves to a nil global if not
+  re-declared), `--trace-68` (TAIL68 loader-tail tracer: at 44000 the tail
+  runs 35BD..35CC then the ring-0 gate call lcall 0xCB,0 does NOT return —
+  the boot continues inside the supervisor; the 164000 tail samples are the
+  slide walking through it), `--trace-alloc` (the 13BBF pool-base call at
+  PM 02EF:B56D with retro).
+
+Next session (R12 part 3 continued): resolve the KRNL286 placement paradox —
+(a) trace the glue's KRNL286 load path (1861:00E9 AH=4B with
+DS:DX="C:\WINDOWS\SYSTEM\KRNL286.EXE", param block at 0x1436:0x2200) against
+the R10-era evidence of PSP 0x1426 — check whether DOSX's own EXEC parameter
+block or the glue's INT 21h interception should keep KRNL286 inside DOSX's
+block; (b) if the child EXEC is correct, find what keeps the straddle
+(0x199B0..0x1BBFC) out of the child's pool on real hardware — candidates:
+the DOSX glue's INT 2Fh handler (0x1861:0x97B) intercepting KRNL286's DOS
+calls, or the child PSP:02/derivation reading a smaller top-of-memory once
+maxalloc=0 is honored (our EXEC gives bound-NE children
+`math.max(minimumParas, dosLargest)` — inflating PSP:02 to 0xA000 vs the
+DOS-faithful 0x2B0B for maxalloc=0 — but note 3.0a KERNEL.EXE ALSO has
+maxalloc=0 and needs the big block, so any sizing fix must stay gated so the
+3.0a baseline keeps its arena); (c) alternatively verify whether the second
+PM re-entry's stub call target is supposed to be re-copied from staging
+0x2942 (which survives ABOVE the pool at 0x29420) — a resident-image
+self-repair the glue may perform on re-entry.
 
 
 ## Current state (2026-11-03, R7)
