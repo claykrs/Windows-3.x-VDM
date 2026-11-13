@@ -684,17 +684,33 @@ established — the AX=0x4B00 EXEC callback at step 10000 was transient (it
 walked past the table into garbage and the boot continued), and the DPMI
 callback registrations don't exist.
 
-Next session (R12 part 4 continued): **what should set cs:[0x18C] (linear
-0x1276C) bits 0x3F?** The bits represent RM-side work items that the PM
-phase is polling for. Options: (a) trace who the caller is (the code at
-ax=0x5001 bx=0x1426 calling the poll via the supervisor trampoline —
-find the 0x5001 service id in the DOSX or KRNL286 code to identify what
-the caller expects from the poll), (b) the 0x18C bits might be set by the
-DOSX glue's INT 21h handler (0x125E:0x05CC) when DOS calls complete, (c)
-the caller may be KRNL286's PM code polling for the INT 21h AH=4B EXEC
-completion of the previous module load — if so, our AH=4B implementation
-should signal completion via the callback mechanism that sets these bits.
-The 0x5001 service id is the immediate next clue to chase. — the table is
+**R12 part 4 sixth pass (2026-11-13): the INT 21h vector conflict RESOLVED —
+our core never touches it; the hook stays installed.** A full-boot
+post-write IVT provenance (`--trace-v21f`, V21F lines, 4M steps) captured
+exactly TWO write events to IVT 21h (linear 0x84-0x87):
+
+1. Step 10000: 125E:093A (`int 21h AH=25 AL=21`) → vector = **0x125E:0x05CC**
+2. Step 162000: 1861:0924 (the glue re-hook) → same vector 0x125E:0x05CC
+
+The vector NEVER reverts to our core's default stub (0024:F100). The
+pass-10 SCANV21 reading of `ivt21=0024:F100` was a timing artifact (the
+read happened before the hook install within the same step-slice). The
+0x125E segment maps to linear 0x125E0 — WIN.COM's block (0x10EF..
+0x1424), NOT the DOSX image (0x29420). So the INT 21h hook at 0x125E:
+0x05CC is WIN.COM's own INT 21h handler, and the event flags at cs:0x18C =
+linear 0x1276C are also WIN.COM's data. The RM callback poll at cs=0x125E:
+0x067C checks WIN.COM's own event bits. The handler at 0x05CC should set
+those bits when DOS calls complete.
+
+Next session (R12 part 4 continued): disassemble WIN.COM's INT 21h handler
+at 0x125E:0x05CC (linear 0x126CC = WIN.COM file offset 0x5CC via the
+image-at-0x10100 mapping) — the handler code between offset 0x5CC and the
+event-flag writes at 0x18C — to find the bit-set sites and determine why
+they don't fire in our boot. The handler passes through to our core's
+INT 21h (the FN[0x48] wrapper sees the AH=48 calls), so the question is
+whether the handler's post-processing (which should set the 0x18C bits)
+depends on state we don't provide, or whether the handler skips the
+bit-set for specific AH values (like AH=4B EXEC). — the table is
 byte-correct (only one copy exists; no 4B00) and the EXEC was never routed
 through WIN.COM's INT 21h hook (the scan's INT 21h vector is our core's
 default stub). The spin is a PM→RM callback with AX=0x4B00 dispatched into
