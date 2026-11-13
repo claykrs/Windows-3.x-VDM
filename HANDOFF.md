@@ -280,34 +280,102 @@ restore now re-reads ALL segment caches via `loadSeg` (correct 286 IRET
 cache-reload semantics) and the snapshot stomp lines are gone. Gate: CHECK
 PASSED.
 
-**R12 — PART 2 (frontier): DOSX PM image truncated at 0x175C bytes.** With
-the restore fixed, PM re-entry (1861 glue -> LMSW -> jmp 0x78:0B0E -> jmp
-0x5B:0B51) runs the DOSX PM stub at image 0x18610: header words
-0x1436/0x05FE/0x125E, code from +0x000A (mov ax,0x1436; mov ds,ax; mov
-ss,ax; mov sp,0x100; call +0x2956). That call lands at image offset 0x2971
-which is ZERO in our memory (real content ends at +0x175C; a 14KB zero sea
-follows), so execution slides through `add [bx+si],al` until a data byte
-`03 6D 0B` faults on [ds:0xFFF7] (ds=0x427 limit 0x21EF — the descriptor
-itself is faithful; the access is from garbage execution). Evidence:
-- DOSX.EXE is now staged at C:\WINDOWS\DOSX.EXE (stage_install31.py root
-  list; probe previously logged `OPEN FAIL C:\WINDOWS\dosx.exe`). The guest
-  opens it and EXECs it (32682 bytes, MZ cblp=0x1AA cp=0x40 hdr=0x200 ->
-  load image 0x7DAA) but the image at 0x18610 is still only 0x175C bytes.
-- The 0x18610 image was populated BEFORE the disk file existed, by WIN.COM's
-  embedded-copy path; the sub-routine region was never written by anyone
-  (write-watch on 0x1AF80 shows only early zero-fills at 1133:0E3A step 8000
-  and 30D4:0093 step 14000).
-- Probe instrumentation in media/win31/probe31.lua (gitignored): IMGW writes
-  to 0x19610, BNDW nonzero writes 0x19D60+, DOSXW 0x1AF80, SLIDE START
-  detector, LOADSEG cs=5B spy, event log + 1200-entry retro ring, FAULTCPU/
-  FAULTDESC/FAULTCODE/FAULTGDT/FAULTJMP dumps. Probe run:
-  `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
-  --steps 400000`.
-Next: determine how WIN.COM's loader builds the dosx resident image (who
-writes the first 0x175C bytes, why the copy stops, and whether the EXEC'd
-DOSX.EXE load image should BE the aliased image — i.e. GDT[0x58] base should
-point at the full EXEC'd copy, or the loader's size/address computation is
-off).
+**R12 — PART 2 (SOLVED DIAGNOSIS, 2026-11-13): the image is NOT truncated —
+KRNL286's PM pool clobbers it, and the second PM re-entry walks into the
+clobber.** The boot's old "image ends at 0x175C" reading was an end-state
+artifact. The full verified chain:
+
+1. **The copy completes and the image is FULL.** WIN.COM EXECs WSWAP.EXE
+   (psp 0x10F0, step 6000; its BSS fill at 1133:0E3A zeroes 0x18610..0x23E30),
+   then DOSX.EXE (psp 0x1426, load image 0x14360, step 12000). The EXEPACK
+   stub (entry cs=0x1BF4) unpacks: DGROUP -> 0x1436, resident image ->
+   0x2942 (0x35F0 bytes, entry 0x2942:000A), PM code -> 0x2CA1 (0x4330
+   bytes), unpacker copy -> 0x30D4. Decompressed span 0x14360..0x30D3F =
+   0x1C9E0 bytes exactly. The DOSX loader (2942:3540..35C0, all constants
+   verified genuine by an offline Python EXEPACK unpacker of the real file —
+   chunk format [payload][count:2][ctl B0=fill/B2=copy, bit0=last], stream
+   read backward from file 0x7DDF, output written backward from linear
+   0x30D3F, 128 chunks, byte-identical to our memory at the loader):
+   writes the loader table to es=0x1861 (2942:316A, 0x7D pairs), moves
+   PM data (0x920 bytes from 0x1861) + PM code (0x4330 from 0x2CA1) to
+   XMS EMB#2 at 0x3EB000 (steps 42000), then rep movsb 0x35EC bytes from
+   staging ds=0x5B (0x29420) to es=0x4B+di=0x42B0 = **0x18610..0x1BBFC
+   (steps 44000, completes with cx=0, si=0x35EC)** — DST-STATE buckets
+   +0000..+3500 all ~230-256/256 nonzero at copy exit — then patches
+   GDT[0x58] base to 0x18610 (2942:35A1..35B8; the earlier desc 0x29420 was
+   the staging). [0x100] = 0x42B0 (written 2942:2B50: align16([2f63]*[2f6f]
+   + 0x30B0); [2f63]/[2f6f] are runtime-clamped loader params), [0x136] =
+   0x1426 (PSP), [0x148] = 0x1861 (image start segment).
+2. **The glue shrink releases the image tail — guest-faithful.** AH=4A
+   es=0x1426 bx=0x575 (caller 1861:00D4, step 112000): bx = 0x13A +
+   [0x148] - [0x136] = 0x13A + 0x1861 - 0x1426. The 0x13A0-byte constant is
+   genuine in the decompressed glue (image+0xBD: `mov bx,0x13A0; shr bx,4;
+   add bx,[0x148]; sub bx,[0x136]`). Block 0x1426..0x199B; free arena
+   0x199C..0xA000. Geometric invariant: the image spans [0x148]..+0x35F
+   paras but the keep only covers +0x13A — **the image tail above +0x13A0
+   (0x224C bytes, 0x199B0..0x1BBFC) is ALWAYS released, on real hardware
+   too.** The shrink is unconditional in the glue's success path (call
+   1861:1C0C = the KRNL286.EXE path resolver at image+0x1C0C — "PATH\0
+   WINDIR\0" string scan + INT 21h AH=43h attr checks — returns NC when
+   found, then jnc -> shrink).
+3. **KRNL286's PM pool clobbers the released tail.** WIN.COM EXECs
+   KRNL286.EXE (psp 0x199C, bound NE top-mapped at 0x8EA2, step 112000).
+   KRNL286 init (PM 02EF, base 0x8FDB0) builds its PM pool: selector 0x3A4
+   base **0x19BF0** limit 0x408F (= KRNL286 PSP+0x23 paras, size default
+   0x4000 since DGROUP word [0x324] bit 0x20 is clear and [0x32]==0), then
+   02EF:B251 (`xor ax,ax; xor di,di; rep stosw`) zeroes 0x4070 bytes =
+   linear 0x19BF0..0x1DC80 = **image offsets 0x15E0..0x5670** — the resident
+   image's tail INCLUDING the stub's call target at image+0x2971. KRNL286
+   *expects* PSP+0x10/PSP+0x20 to be free pool space (it converts segments
+   0x19AC/0x19BC via DPMI AX=0002, seen at 02EF:27A3) — the collision is
+   only with DOSX's released image tail.
+4. **The second PM re-entry walks into the clobber.** At step 162000 an RM
+   process terminates (0C9B glue, registers zeroed — the R11 resume path)
+   and the resume re-enters PM at the resident-image **stub 0x5B:000A**
+   (IMGSTUB 162000, csBase=18610, sp=0xFE2 ss=0x27F). The stub runs
+   (ax=0x1436, ds=ss=0x1436, sp=0x100), executes its `call +0x2956` at
+   image+0x18 -> 0x2971 = ZEROED -> slide -> the 168k fault.
+5. **The skipped EMB switch is the divergence.** DOSX loader phase 2
+   (image+0x11E0): `INT 2Fh AX=1607h BX=0x14` (Windows-being-loaded notify),
+   then `mov cx,es; jcxz` — **if ES comes back 0 the 0x40-word response table
+   copy to DGROUP [0x2CA8] is skipped** — then `call 0xa60` (the XMS copy)
+   and **`ljmp 0x53:0x3BD6`** — selector 0x53 base 0x3EB920 = the EMB PM
+   code (the R10-era boots ran cs=0x53 there!). Our core answers 1607 with
+   nothing (es stays 0), the table copy is skipped, and the second re-entry
+   still dispatches into the resident image instead of the EMB-based PM
+   code. The R10-era boots (pool at HMA 0x101030, cs53=3EB920) got further
+   through this same path before the R11/R12 fixes.
+6. Supporting facts: KRNL286's DPMI check (image C8E5 = PM 02EF:B4CB:
+   INT 2Fh AX=1687) PASSES in our boot (ax==0 — answered somewhere in the
+   hook chain), the DPMI mode-switch lcall runs, and KRNL286's DOS-alloc
+   service 13BBF allocates its new DGROUP via DPMI selector services. The
+   KRNL286 no-DPMI branch (image C9F9) prints an error at cs:0x9921 and
+   terminates AH=4C FF — it did NOT run in our boot.
+7. Probe tooling added (all gitignored, media/win31/probe31.lua):
+   `--watch-imgw` (image writers 0x18610..0x18660 + copyFrom into
+   0x18610..0x23000 + GDT[0x58] change tracer + EXECW landing probe +
+   end-of-run IMGMAP), `--watch-staging`, `--watch-copy` (COPYLOOP state at
+   the 005B:359B copy exit + SRC/DST bucket maps), `--watch-zero` (ZERO2
+   image-tail zero writer + TRACE4A shrink callers + SZW [0x136]/[0x148]/
+   [0x100] writers + SZTABLE + LOADER/GLUE/CALLEE hexdumps + ZEROCODE),
+   `--watch-callee`, `--watch-entry` (IMGSTUB 0x000A entries + retro dump),
+   `--watch-a20`, `--trace-31` (PM INT 31h instructions), `--trace-dpmi`,
+   XMS prints now carry steps. Run:
+   `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
+   --watch-imgw --steps 400000`.
+
+Next session (R12 part 3): make the phase-2 EMB switch happen — decide who
+should answer `INT 2Fh AX=1607h BX=0x14` (the DOSX hook chain expects the
+Windows-being-loaded response table in ES:SI; WIN.COM's stub-built INT 2Fh
+hook at WIN.COM:0x2A7 is the likely real answerer — dump what it builds at
+runtime), verify the copied table drives the 0x53:0x3BD6 EMB dispatch, and
+check whether the second PM re-entry (0C9B glue) then enters the EMB-based
+PM code instead of the resident stub. Alternative/adjacent leads: the INT 2Fh
+AX=1600h "Windows active" answer (KRNL286 sets [0x324] bit 0x21 when AL==3 —
+our core says "not installed", matching the 3.0a baseline but not the 3.1
+boot state), and the DPMI 0500/0501 free-block table loop at KRNL286 image
+C0F4 (never ran in our boot — the pool came from [0x5B4] = the 2-para DOS
+alloc at 0x19BE instead).
 
 
 ## Current state (2026-11-03, R7)
