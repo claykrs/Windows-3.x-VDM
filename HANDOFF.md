@@ -653,15 +653,48 @@ completely different loop, NOT the callback scan. The LDT descriptor for
 must be dumped via --dump-cs or the descriptor captured at the right
 moment.
 
-Next session (R12 part 4 continued): diagnose the cs=0x125E offset
-0x61C-0x6E9 loop that stalls the boot at 1.2M-4M. This is KRNL286's PM
-phase (the LDT selector 0x125E maps to a KRNL286 segment). Dump the
-executing code (--dump-cs captures cs:ip and the segment head — but only
-for the LAST cs, which may be 0x1000 not 0x125E — extend --dump-cs or add
-a dedicated cs=0x125E ip-dump), identify the loop's exit condition, and
-determine whether it's a wait-for-something loop (waiting for the PM→RM
-callback result, a semaphore, or a status flag we don't set) or an
-emulation bug (a wrong comparison or a missing event). — the table is
+**R12 part 4 fifth pass (2026-11-13): the 1.2M-4M "stall" decoded — it is
+WIN.COM's RM callback poll loop, and the poll always returns "nothing to
+do" because the event flags (cs:[0x18C] & 0x3F in segment 0x125E) are never
+set.**
+
+The code at cs=0x125E offset 0x067C-0x06EF (from the STALLCODE dump at
+linear 0x125E0+0x65F = 0x12C3F — WIN.COM's block, NOT the DOSX image):
+- 0x67C: `push ax; mov al,1; xchg byte cs:[0x193],al` — set busy flag
+- 0x687: `je 0x68C` — if not busy, continue
+- 0x68C: `test byte cs:[0x18C], 0x3F` — check 6 event-flag bits
+- 0x694: `jmp 0x6E9` — if clear: clear busy and ret (nothing to do)
+- 0x697-0x6E7: the callback dispatch body (saves ss/sp, calls 0x9A7/0x6F0,
+  restores ss/sp — the actual RM callback processing)
+- 0x6E9: `mov byte cs:[0x193], 0` — clear busy, ret
+
+At step 1300000 the state is: `cs=0x125E ip=0x067F ax=0x5001 bx=0x1426
+ds=0x1436 ss=0x1436 sp=0xF6` — the caller's ax=0x5001 (a service id!),
+bx=0x1426 (the DOSX PSP segment). The RM callback poll returns "nothing to
+do" because cs:[0x18C] & 0x3F == 0 — no RM callback events pending.
+
+**No code in the DOSX image writes cs:[0x18C]** — the event flags live in
+WIN.COM's copy of the callback data (segment 0x125E = linear 0x125E0,
+offset 0x18C = linear 0x1276C, inside WIN.COM's block 0x10EF..0x1424). The
+bits should be set by whatever processes the RM callbacks (the WIN.COM
+second-stage code that KRNL286 calls into). In our boot the PM phase calls
+the RM poll repeatedly but no events ever fire because the PM→RM callback
+protocol (which would set the event bits on completion) was never
+established — the AX=0x4B00 EXEC callback at step 10000 was transient (it
+walked past the table into garbage and the boot continued), and the DPMI
+callback registrations don't exist.
+
+Next session (R12 part 4 continued): **what should set cs:[0x18C] (linear
+0x1276C) bits 0x3F?** The bits represent RM-side work items that the PM
+phase is polling for. Options: (a) trace who the caller is (the code at
+ax=0x5001 bx=0x1426 calling the poll via the supervisor trampoline —
+find the 0x5001 service id in the DOSX or KRNL286 code to identify what
+the caller expects from the poll), (b) the 0x18C bits might be set by the
+DOSX glue's INT 21h handler (0x125E:0x05CC) when DOS calls complete, (c)
+the caller may be KRNL286's PM code polling for the INT 21h AH=4B EXEC
+completion of the previous module load — if so, our AH=4B implementation
+should signal completion via the callback mechanism that sets these bits.
+The 0x5001 service id is the immediate next clue to chase. — the table is
 byte-correct (only one copy exists; no 4B00) and the EXEC was never routed
 through WIN.COM's INT 21h hook (the scan's INT 21h vector is our core's
 default stub). The spin is a PM→RM callback with AX=0x4B00 dispatched into
