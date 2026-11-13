@@ -624,18 +624,34 @@ WIN.COM's callback table.**
   guest registered via DPMI real-mode callbacks (AX=0303) during WIN.COM's
   phase.
 
-Next session (R12 part 4 continued): trace **who issues the AX=4B00
-callback** — a retro at the scan's first entry identifies the PM-side caller
-(the KRNL286-phase PM code requesting an EXEC via the RM callback protocol).
-Then decide the fix: either WIN.COM's dispatcher should be reached with a
-different protocol (the real KRNL286/WIN.COM pair's RM callback for EXECs —
-check the DOSX glue's INT 2Fh handler 0x1861:0x97B which KRNL286's RM calls
-route through), or our EXEC path (AH=4B) should answer it before WIN.COM's
-dispatcher sees it (the callback may be a *passthrough* that WIN.COM is
-supposed to forward to DOS). Also check the second table the scan walks
-into (the KRNL286-era copy's bytes may hold the 4B00 entry further along —
-compare WIN.COM's 0x125E-copy bytes against the file image to confirm it is
-byte-identical before assuming the table lacks 4B00).
+**R12 part 4 third pass (2026-11-13): no DPMI callback registrations exist —
+the DOSX callback protocol is its own.** A full-boot watch (probe
+`--trace-cb`, 1.5M steps) for INT 31h AX=0303/0304 (DPMI Allocate/Free
+Real-Mode Callback) found ZERO calls — DOSX's RM callback protocol is not
+DPMI-based. The candidate registration mechanism is the **INT 68h 0x50xx
+service family** (0x5000 reserve / 0x5040 dispatch / 0x5041 with
+di=DGROUP+0x2F11 observed at image 2C4A-2C57) — DOSX's private RM-service
+interrupt that our boot leaves unhooked (no INT 68h host on vanilla
+DOS 5+HIMEM).
+
+Also: the WIN.COM dispatcher entries do NOT happen at cs=0x1000 ip=0x0D19
+(zero hits at 1.5M with a dedicated watch) — **the callbacks enter the
+0x125E copy of the dispatcher** (the KRNL286-era segment; the scan's
+ds=0x125E matches). The next probe must watch cs=0x125E ip=0x0D19-0x0D35
+for the dispatcher entries and the callback caller.
+
+Next session (R12 part 4 continued): the fork is resolved — the table is
+byte-correct (only one copy exists; no 4B00) and the EXEC was never routed
+through WIN.COM's INT 21h hook (the scan's INT 21h vector is our core's
+default stub). The spin is a PM→RM callback with AX=0x4B00 dispatched into
+WIN.COM's callback table. The open question: **which callback address the
+PM-side caller invoked, and whether a DOSX-side callback (which can EXEC)
+exists and should have been called instead.** Enumerate the real-mode
+callback registrations (DPMI INT 31h AX=0303/0304 — log ES:DI handler,
+DS:SI, returned CX:DX handle), then at the 4B00 invocation identify which
+registered address was invoked and where the PM-side caller loaded its
+callback pointer from (WIN.COM's phase-2 handoff, the DPMI callback
+allocation, or the 0x1861:0x97B INT 2Fh handler).
 
 
 ## Current state (2026-11-03, R7)
