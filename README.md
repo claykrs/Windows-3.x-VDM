@@ -179,18 +179,18 @@ being finished. Where it stands:
   (top-first allocation), and the boot chain — `WIN.COM` EXECs WSWAP and
   DOSX cleanly, DOSX claims extended memory, relocates its PM image, and
   KRNL286 executes in protected mode.
-- **Just fixed (R9):** the kernel's first protected-mode fault — a `#GP`
-  in the GlobalAlloc heap walk at step ~144k — is root-caused and solved
-  (`6557b2e`). Our CPU's `LAR`/`LSL` inverted the ZF semantics, so
-  KRNL286's selector-validation path (`lar ax,sel / jne`) mis-resolved
-  seg1's home block and a 0xB6CB-byte move wiped the kernel heap header.
-  With Intel-correct flags the boot now loads KRNL286's segments fault-free
-  through step ~162k.
-- **Being finished now (R10):** after KRNL286 initialization the boot
-  returns to real mode at `0x0C9B` and wild-far-returns into the BIOS area
-  (`FFFF:10FD`). Tracing the callback/dispatch path that real DOSX uses
-  there is the current frontier; after it, the kernel continues toward
-  USER/GDI 3.1.
+- **Solved arcs R9-R12:** LAR/LSL ZF semantics (`6557b2e`), guest MCB-chain
+  coherence (`f2ef54e`), DOSX-resident terminate-vs-continue (`3091c20`),
+  the IRET pmSaved restore (re-read segment caches via `loadSeg`, drop the
+  `csSel<<4` alias stomp, `78433f7`), and the missing PE gate on the
+  pmSaved branch (`706d5cb`) plus INT 21h AH=4D. The boot now passes its
+  old 168k wall and runs **4M steps fault-free**: DOSX EXEC'd, KRNL286
+  EXEC'd, and KRNL286's protected-mode phase running with WIN.COM's second
+  stage alive.
+- **Being finished now:** KRNL286's PM phase polls WIN.COM's RM callback
+  work bits (`cs:[0x18C] & 0x3F` in WIN.COM's block) that nothing sets
+  yet — the current frontier is WIN.COM's INT 21h handler post-processing
+  (`25ec92e` in HANDOFF.md has the full evidence chain).
 
 Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
 [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
