@@ -577,14 +577,42 @@ child's return code) was unimplemented** — implemented in core/Dos.lua
 168k and runs 1.2M steps with no fault** — DOSX, KRNL286 EXEC'd, the PM
 phase running. The R12 slide frontier is gone.
 
-Next session (R12 part 4): find the NEW frontier with a long probe run
-(--steps 1200000 already runs clean — push to 4-8M with --trace flags as
-needed) and report where the boot goes after the KRNL286 phase (the PM
-kernel's own progress: does it reach KRNL286's PM entry, the DOSX PM
-services, the drivers?). The 0x11B0 EMB dispatch already worked; the 1607/14
-phase-2 block remains off-path by design; INT 68h/0xF386 stays unhooked
-(matches vanilla DOS 5+HIMEM). The staging re-copy question stays open but
-may be moot now that the boot runs past the slide.
+**R12 part 4 first pass (2026-11-13): the new frontier found — WIN.COM's RM
+callback dispatcher spins forever on an UNKNOWN callback AX=0x4B00.**
+
+- 4M steps run clean (no fault, no slide), but the boot spends 1.2M..4M in
+  one place: WIN.COM's RM callback dispatcher at 1000:0D2C (WIN.COM's PSP is
+  0x1000, image at linear 0x10100, file offset 0xD2C) — a table scan:
+  `lea bp,[0xDF0]; cmp [bp],ax; je match; add bp,4; jmp back`, dispatching
+  RM callbacks by AX id to handlers via `add bp,2; jmp word [bp]`.
+- **The table (WIN.COM file 0xCF0)** has six entries — ids **4A05, 4B03,
+  4B04, 4B05, 4B06, 160A** — plus a terminator id=0000 (handler 0x0E3E, the
+  "no match" chain via `ljmp cs:[0xd4b]`). **No bounds check**: an unknown
+  nonzero AX walks past the terminator into code bytes treated as table
+  entries and spins forever (observed: 434+ entries walked at
+  ds=0x125E:[bp=0x6C8] — the KRNL286-era copy of the dispatcher at segment
+  0x125E; cs=0x1000/0x125E both observed).
+- **The unknown callback is AX=0x4B00 — the DOS EXEC function id.** KRNL286's
+  PM phase is requesting a program load through WIN.COM's RM callback
+  protocol, and WIN.COM's table has no 4B00 entry. The scan's `push cs;
+  pop ds` shows the table lives in the callback's own segment (cs=0x125E
+  observed — a KRNL286-era copy of the dispatcher; the DGROUP-resident copy
+  at cs=0x1000 also seen).
+- Probe additions: `--trace-scan` (SCAN lines at 1000:0D2C-0D35 with
+  ax/bp/ds/[bp]) and the DUMP_DESC selector list now includes 0x125E/0x0427.
+
+Next session (R12 part 4 continued): trace **who issues the AX=4B00
+callback** — a retro at the scan's first entry identifies the PM-side caller
+(the KRNL286-phase PM code requesting an EXEC via the RM callback protocol).
+Then decide the fix: either WIN.COM's dispatcher should be reached with a
+different protocol (the real KRNL286/WIN.COM pair's RM callback for EXECs —
+check the DOSX glue's INT 2Fh handler 0x1861:0x97B which KRNL286's RM calls
+route through), or our EXEC path (AH=4B) should answer it before WIN.COM's
+dispatcher sees it (the callback may be a *passthrough* that WIN.COM is
+supposed to forward to DOS). Also check the second table the scan walks
+into (the KRNL286-era copy's bytes may hold the 4B00 entry further along —
+compare WIN.COM's 0x125E-copy bytes against the file image to confirm it is
+byte-identical before assuming the table lacks 4B00).
 
 
 ## Current state (2026-11-03, R7)
