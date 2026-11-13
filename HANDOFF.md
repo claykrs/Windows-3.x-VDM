@@ -601,6 +601,29 @@ callback dispatcher spins forever on an UNKNOWN callback AX=0x4B00.**
 - Probe additions: `--trace-scan` (SCAN lines at 1000:0D2C-0D35 with
   ax/bp/ds/[bp]) and the DUMP_DESC selector list now includes 0x125E/0x0427.
 
+**R12 part 4 second pass (2026-11-13): the INT 21h provenance traced — the
+spin is NOT a misrouted INT 21h; it is a PM→RM callback dispatched into
+WIN.COM's callback table.**
+
+- **INT 21h vector provenance** (`--trace-v21`, V21W lines): the DOSX-side
+  hook (segment 0x125E, handler 0x05CC) is installed at step 10000
+  (`int 21h AH=25 AL=21` at 125E:093A → IVT 21h = 0x125E:0x05CC) and
+  RE-HOOKED by the DOSX glue (1861:0924) at 162000 (same vector). But the
+  spinning scan's own INT 21h vector is **0x0024:0xF100 — our core's default
+  stub** (SCANV21 lines). So the EXEC request was never misrouted through
+  WIN.COM's INT 21h hook: the scan is not an INT 21h handler at all.
+- **The spin is a PM→RM callback dispatched into WIN.COM's callback table.**
+  KRNL286's PM phase requests a program load (AX=0x4B00, the DOS EXEC id)
+  via its RM callback protocol, and the callback lands in WIN.COM's
+  dispatcher (cs=0x1000/0x125E copies), whose table lacks 4B00. The
+  unbounded scan then walks past the terminator into code bytes.
+- The dosx-side INT 21h hook (0x125E:0x05CC) exists from step 10000 but is
+  not involved: the KRNL286-phase DOS calls that reach our core's FN[0x48]
+  wrapper are separate. The callback dispatch table (which PM→RM callback
+  target handles which AX) is the thing our emulation populated or the
+  guest registered via DPMI real-mode callbacks (AX=0303) during WIN.COM's
+  phase.
+
 Next session (R12 part 4 continued): trace **who issues the AX=4B00
 callback** — a retro at the scan's first entry identifies the PM-side caller
 (the KRNL286-phase PM code requesting an EXEC via the RM callback protocol).
