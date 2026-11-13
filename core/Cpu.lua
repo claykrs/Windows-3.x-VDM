@@ -1792,7 +1792,11 @@ H[0xCF] = function(cpu: any) -- IRET
 	-- PM↔RM execution switch: if we saved PM state on a far transfer to an
 	-- RM segment, and the IRET target selector looks like a PM selector
 	-- (has LDT/GDT bit set or maps to a descriptor), restore the PM state.
-	if cpu.pmSaved and (csSel < 0x0064 or band(csSel, 4) ~= 0) then
+	-- The IRET must be running in real mode (PE=0) for this to be a genuine
+	-- RM→PM return: a PM→PM IRET (e.g. the DOSX supervisor's 0x78→0x5B
+	-- privilege transition) also targets low selectors and must pop its
+	-- frame's SS:SP normally instead of restoring a stale snapshot (R12).
+	if cpu.pmSaved and band(cpu.cr0, 1) == 0 and (csSel < 0x0064 or band(csSel, 4) ~= 0) then
 		local pm = cpu.pmSaved
 		cpu.pmSaved = nil
 		cpu.cr0 = pm.cr0

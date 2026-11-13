@@ -21,6 +21,7 @@ export type Host = {
 	pspSeg: number?,
 	deps: any,
 	memBlocks: { { start: number, size: number, owner: number } },
+	lastChildCode: number?,
 	exit: (self: any, code: number) -> (),
 	dosTerminate: (self: any, cpu: any, code: number) -> boolean,
 	dosAlloc: (self: any, paras: number) -> number?,
@@ -1093,6 +1094,13 @@ end
 
 Dos.FN[0x4C] = function(_self: Dos, cpu: any, machine: Host)
 	machine:dosTerminate(cpu, al(cpu))
+end
+
+-- AH=4D: get the last child's return code. AL = the termination manner
+-- (00h normal, 01h ctrl-break, 03h stay-resident), AH = the exit code the
+-- child passed to AH=4Ch / INT 20h.
+Dos.FN[0x4D] = function(_self: Dos, cpu: any, machine: Host)
+	cpu:wr(1, bor(band(machine.lastChildCode or 0, 0xFF), 0x0000))
 end
 
 -- Undocumented DOS "create child PSP" (used by EXEC and by KERNEL's own

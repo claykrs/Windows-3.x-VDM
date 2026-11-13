@@ -78,6 +78,7 @@ export type Machine = {
 	waiting: string?,
 	pendingInt: number?,
 	exitCode: number?,
+	lastChildCode: number?,
 	timerInterval: number,
 	timerPhase: number,
 	arenaTop: number,
@@ -922,6 +923,7 @@ end
 -- terminating the RM shell must resume the kernel, not end the machine; a
 -- plain-DOS terminate (no PM handoff) still exits as before.
 function Machine.dosTerminate(self: Machine, cpu: any, code: number): boolean
+	self.lastChildCode = code
 	if cpu.dosxResident then
 		const psp = self.pspSeg or 0x1000
 		const base = lshift(psp, 4)

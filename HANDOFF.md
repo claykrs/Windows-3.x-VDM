@@ -525,19 +525,66 @@ EMB dispatch already happens.**
   inner blocks must re-declare locals (`bx` resolves to a nil global), and
   formatted stack strings must not be re-fed to `%04X`.
 
-Next session (R12 part 3 continued): the crash is now a **stale/never-written
-DGROUP stack slot (0x4B:0xFE0 = 0x15340) consumed by the supervisor's IRET
-frame at the second re-entry**. Work backwards from the supervisor: who
-enters 0078:0B0E-0B16 at the 162000 resume (the glue's 0x191 path ends at
-INT 21h AH=50 + the INT 2Fh restore — it does NOT reach the supervisor), so
-find the actual 0x78-entry caller (hook cs==0x78 ip==0x0B0E/0x0B16 entries
-with retro) and what sets the 0x68-stack SP that becomes the IRET frame's
-SP pointer; then determine what the 0x4B:0xFE0 slot should hold on real
-hardware (the KRNL286-phase PM code that writes it — possibly inside the
-clobbered region — or a DGROUP-stack contract the loader establishes in
-phase 1). Also still open: whether the loader's 0x3540 copy is re-run on
-real HW before the re-entry (trace reads of staging 0x29420..0x2A00C after
-step 128000 — none observed so far).
+**R12 part 3 fifth pass (2026-11-13): the crash slot is NOT the DGROUP slot
+I was watching — it is 0x27F:0xFE0 = linear 0x2B510, on the KRNL286-era
+stack selector 0x27F whose base is 0x2A530 (INSIDE the freed region), and
+the supervisor's IRET frame words for sp/ss (0xFE0/0x27F) do not match the
+values the supervisor pushed (0xF0/0x4B) — the frame is modified between
+push and IRET, or the pops shift.**
+
+- **Slot provenance corrected**: the earlier SLOT watch watched linear
+  0x14440..0x14470 (from the misread sp=0xF0) — the true crash slot is
+  0x27F:0xFE0 = linear 0x2A530+0xFE0 = **0x2B510**, on the KRNL286-era stack
+  (the 0x27F LDT selector, base 0x2A530, allocated in the freed region).
+  TRAMP 162000: `ret-at ss=027F base=2A530 sp=0FE0 stack=[0000 0407 A1C4
+  0407 0001 0427 00FF A410] target=0000:005B` — the popped 0x0000 → cs stays
+  0x5B → the image header → the stub → the clobbered 0x2971. The slot's
+  provenance (who wrote linear 0x2B510) is the next probe target.
+- **Supervisor entry at 162000** (`SUP78`): `0078:0B0E ax=0001 ss=1436
+  sp=00F0` — the supervisor is entered with **RM-residue segment values**
+  (ss=0x1436 = the DGROUP segment value used as a PM selector!) — the lmsw
+  transition preserves RM segment values and the PM descriptors for those
+  selector values must exist. At the 42000 first entry the same block was
+  entered with ss=0x1436 sp=0x00F8 (loader phase 1).
+- **IRET frame discrepancy**: the supervisor pushes (in order) sp-word
+  0x4B?? no — `mov ax,sp` (=0xF0) / `push 0x4B` / `push ax` / `pushf` /
+  `pop ax; or ah,0x30` / `push ax` / `push 0x5B` / `push 0xB51` / `iret` —
+  the frame at 0x68:0xE2.. = ip=0xB51, cs=0x5B, flags, sp=0xF0, ss=0x4B.
+  But the trampoline's observed SS:SP = 0x27F:0xFE0. Either the frame words
+  at 0x68:0xEC/0xEE were overwritten between the pushes and the IRET (PM
+  interrupt? another writer?), or the IRET pops shifted, or our CPU's
+  privilege-change IRET semantics differ from the guest's expectation. This
+  discrepancy IS the crash mechanism: the trampoline's ret pops from
+  whichever SS:SP the IRET produced, and the produced slot (0x2B510) holds
+  a stale zero instead of a return address.
+- Probe fixes: the SLOT watch now covers 0x15340..0x15350 (the DGROUP slot
+  — still never written after the decompression fills, confirming no
+  DGROUP-side initializer ran) and SUP78/TRAMP are gated to steps>=150000
+  with raised caps (the earlier caps silently ate the 162000 data).
+
+**R12 part 3 SOLVED (2026-11-13, commits machine:/dosx:): the crash's root
+cause was OUR CPU — the IRET's pmSaved PM↔RM branch had no PE gate, so the
+supervisor's PM→PM IRET (0x78→0x5B, both low selectors) wrongly restored the
+stale pmSaved snapshot (ss=0x27F sp=0xFE0, the KRNL286-era stack) instead of
+popping its own frame's SS:SP (0x4B:0xF0).** Fix: gate the branch on
+`band(cpu.cr0, 1) == 0` in core/Cpu.lua H[0xCF] — the branch is for genuine
+RM→PM returns, which run with PE=0. With the gate, the trampoline pops the
+intended slot (0x4B:0xF0 = 0x0E53) and returns into the loader at
+0x5B:0x0E53. The boot then hits the NEXT frontier: **INT 21h AH=4D (get
+child's return code) was unimplemented** — implemented in core/Dos.lua
+(FN[0x4D]: AL=00 normal, AH=lastChildCode; Machine.dosTerminate now records
+`lastChildCode = code` for every terminate path). Result: **the boot passes
+168k and runs 1.2M steps with no fault** — DOSX, KRNL286 EXEC'd, the PM
+phase running. The R12 slide frontier is gone.
+
+Next session (R12 part 4): find the NEW frontier with a long probe run
+(--steps 1200000 already runs clean — push to 4-8M with --trace flags as
+needed) and report where the boot goes after the KRNL286 phase (the PM
+kernel's own progress: does it reach KRNL286's PM entry, the DOSX PM
+services, the drivers?). The 0x11B0 EMB dispatch already worked; the 1607/14
+phase-2 block remains off-path by design; INT 68h/0xF386 stays unhooked
+(matches vanilla DOS 5+HIMEM). The staging re-copy question stays open but
+may be moot now that the boot runs past the slide.
 
 
 ## Current state (2026-11-03, R7)
