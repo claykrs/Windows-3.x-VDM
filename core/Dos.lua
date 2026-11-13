@@ -22,6 +22,7 @@ export type Host = {
 	deps: any,
 	memBlocks: { { start: number, size: number, owner: number } },
 	exit: (self: any, code: number) -> (),
+	dosTerminate: (self: any, cpu: any, code: number) -> boolean,
 	dosAlloc: (self: any, paras: number) -> number?,
 	dosReserve: (self: any, start: number, paras: number) -> boolean,
 	dosSetOwner: (self: any, seg: number, owner: number) -> boolean,
@@ -255,8 +256,8 @@ end
 
 Dos.FN = {} :: { [number]: Handler }
 
-Dos.FN[0x00] = function(_self, _cpu, machine)
-	machine:exit(0)
+Dos.FN[0x00] = function(_self, cpu, machine)
+	machine:dosTerminate(cpu, 0)
 end
 
 Dos.FN[0x01] = function(_self: Dos, cpu: any, machine: Host) -- read key with echo
@@ -1091,7 +1092,7 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 end
 
 Dos.FN[0x4C] = function(_self: Dos, cpu: any, machine: Host)
-	machine:exit(al(cpu))
+	machine:dosTerminate(cpu, al(cpu))
 end
 
 -- Undocumented DOS "create child PSP" (used by EXEC and by KERNEL's own

@@ -509,13 +509,13 @@ function Machine.new(deps: Deps, config: Config?): Machine
 			cpu:setbits(1, false)
 		end,
 		[0x20] = function()
-			self:exit(0)
+			self:dosTerminate(self.cpu, 0)
 		end,
 		[0x21] = function()
 			self.dos:int21()
 		end,
 		[0x27] = function()
-			self:exit(0)
+			self:dosTerminate(self.cpu, 0)
 		end,
 		[0x2F] = function()
 			-- multiplexor: XMS owns 4300/4310; everything else reports nothing
@@ -915,6 +915,27 @@ function Machine.dosLargest(self: Machine): number
 		end
 	end
 	return largest
+end
+
+-- MS-DOS terminate: the terminating process's PSP:000A holds the INT 22h
+-- resume address of its parent. While the DOSX PM kernel is resident (R11),
+-- terminating the RM shell must resume the kernel, not end the machine; a
+-- plain-DOS terminate (no PM handoff) still exits as before.
+function Machine.dosTerminate(self: Machine, cpu: any, code: number): boolean
+	if cpu.dosxResident then
+		const psp = self.pspSeg or 0x1000
+		const base = lshift(psp, 4)
+		-- x86 far-pointer layout in the PSP: offset at +0A, segment at +0C
+		const off = self.mem:read16(base + 0x0A)
+		const seg = self.mem:read16(base + 0x0C)
+		if seg ~= 0 then
+			cpu.cs = seg
+			cpu.ip = off
+			return true
+		end
+	end
+	self:exit(code)
+	return false
 end
 
 function Machine.exit(self: Machine, code: number)

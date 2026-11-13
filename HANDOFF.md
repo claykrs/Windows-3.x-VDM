@@ -255,6 +255,28 @@ passes with 924 assertions.
   keeps running" for the 3.1 track (parent/child EXEC resume via INT 22h /
   PSP:000A, or a PM-owns-the-boot flag), then the PM kernel should continue
   past step 162k.
+## R11 — SOLVED: terminate-vs-continue; new frontier R12
+
+The RM "wild return" was the WIN.COM RM glue legitimately terminating its DOS
+process (PSP:0000 `CD 20`) once the PM kernel was up. Fix: `dosTerminate`
+(core/Machine.lua) — with the DOSX-resident flag set (PM→RM switch with the
+LDT active, or LMSW dropping PE), a terminate jumps to the terminating PSP's
+INT 22h parent-resume address (x86 far pointer: offset at PSP:000A, segment
+at PSP:000C; observed 010B:1861) instead of ending the machine. Plain-DOS
+terminates still exit. Tests in tests/DosTests.lua (resume, plain exit,
+missing-resume fallback). Gate: 928 assertions, CHECK PASSED.
+
+Result: the boot now continues past the terminate (step 162k) into the
+kernel's next phase and reaches step 176k before the new frontier:
+
+**R12**: `#GP ds selector 0427 offset FFF0 size 1 exceeds limit 21EF` — the
+PM kernel reads at ds:0xFFF0 past a 0x21EF-limit LDT selector. Likely a
+segment-limit grow the kernel performs via a Set-Descriptor call, or an
+HMA-style wrap access our 286 selector model rejects. Next step: trace which
+guest code performs the 0x427:0xFFF0 access and what limit the descriptor
+should have (probe with --trace-dosxrm; the LDTW hooks capture every
+descriptor write, so compare the 0x427 descriptor's limit before/after).
+
 
 ## Current state (2026-11-03, R7)
 

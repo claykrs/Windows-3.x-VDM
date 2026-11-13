@@ -109,6 +109,8 @@ export type Cpu = {
 	osegReg: string?,
 	rep: number?,
 	defaultInts: { [number]: InterruptHandler },
+	-- set when a PM guest flips back to real mode (DOSX resident; R11)
+	dosxResident: boolean?,
 	stubSeg: number?,
 	intStubs: { [number]: { seg: number, off: number } },
 	tripleFaults: number,
@@ -580,6 +582,11 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 				cr0 = self.cr0,
 			}
 			self.cr0 = band(self.cr0, bit32.bnot(1)) -- clear PE → real mode
+			-- A PM→RM switch with the LDT active is the DOSX-resident state
+			-- (R11): later RM terminates must resume the PM kernel.
+			if self.ldtr ~= 0 then
+				self.dosxResident = true
+			end
 			self.cs = selector
 			self.ip = offset
 			self.es, self.ds, self.fs, self.gs = selector, selector, selector, selector
@@ -2548,6 +2555,13 @@ local function movControl(cpu: any, op: number)
 		const value = if cpu.operand32 then cpu:rr32(e.rm) else cpu:rr(e.rm)
 		if op == 0x22 then
 			if e.reg == 0 then
+				-- A protected-mode guest dropping back to real mode after the
+				-- DOSX handoff marks the RM terminate path (R11): the PM
+				-- kernel stays resident, so later DOS terminates must resume
+				-- it rather than end the machine.
+				if band(cpu.cr0, 1) ~= 0 and band(value, 1) == 0 then
+					cpu.dosxResident = true
+				end
 				cpu.cr0 = value
 			else
 				cpu.cr[e.reg] = value
@@ -2737,6 +2751,11 @@ H0F[0x01] = function(cpu: any)
 		end
 	elseif reg == 6 then
 		const value = cpu:readRM16(e)
+		-- LMSW is the 286's classic PM exit path: dropping PE with the LDT
+		-- active marks the DOSX-resident RM terminate state (R11).
+		if band(cpu.cr0, 1) ~= 0 and band(value, 1) == 0 then
+			cpu.dosxResident = true
+		end
 		cpu.cr0 = bor(band(cpu.cr0, 0xFFFF0000), band(value, 0xFFFF))
 	elseif reg == 7 then
 		-- INVLPG: no paging model yet
