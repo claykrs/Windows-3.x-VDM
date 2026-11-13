@@ -203,9 +203,10 @@ Xms.FN[0x07] = function(self: Xms, cpu: any) -- query A20
 end
 
 Xms.FN[0x08] = function(self: Xms, cpu: any) -- query free memory
+	-- XMS spec: AX = total free KB, DX = largest free block KB.
 	const largest, total = memoryTotals(self)
-	cpu:wr(0, largest)
-	cpu:wr(2, total)
+	cpu:wr(0, total)
+	cpu:wr(2, largest)
 end
 
 Xms.FN[0x09] = function(self: Xms, cpu: any) -- allocate EMB (DX = KB)
@@ -299,8 +300,13 @@ Xms.FN[0x0E] = function(self: Xms, cpu: any) -- get EMB info
 end
 
 Xms.FN[0x88] = function(self: Xms, cpu: any) -- query any extended memory
-	const kb = math.floor((self.machine.mem.size - HMA_START) / 1024)
-	cpu:wr(0, band(kb, 0xFFFF))
+	-- XMS 3.0 "any and all" pool: every KB above the 1 MB line (the HMA is not
+	-- an EMB, but the v3.0 pool starts at the 1 MB mark). AX = largest free
+	-- block KB, DX = total free KB; no v3.0 large EMB allocator exists yet, so
+	-- largest equals total.
+	const kb = band(math.floor((self.machine.mem.size - HMA_START) / 1024), 0xFFFF)
+	cpu:wr(0, kb)
+	cpu:wr(2, kb)
 end
 
 Xms.FN[0x89] = function(self: Xms, cpu: any) -- allocate any extended memory

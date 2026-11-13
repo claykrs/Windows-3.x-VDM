@@ -88,6 +88,233 @@ function MachineTests.run(mkMachine, expect)
 	end
 
 	do
+		-- The guest never sees memBlocks: DOSX/KRNL286 walk the MCB bytes in
+		-- emulated memory starting at the DOS data MCB and following
+		-- next = seg + size + 1 until an MCB with id 0x5A. Every arena
+		-- mutation must keep that walk coherent with the block list.
+		local function walkArena(m)
+			const mCBs = {}
+			local seg = m.memBlocks[2].start - 1
+			local largest = 0
+			for _ = 1, 512 do
+				const base = bit32.lshift(seg, 4)
+				const id = m.mem:read8(base)
+				const owner = m.mem:read16(base + 1)
+				const size = m.mem:read16(base + 3)
+				mCBs[#mCBs + 1] = { seg = seg, id = id, owner = owner, size = size }
+				if owner == 0 and size > largest then
+					largest = size
+				end
+				if id == 0x5A then
+					return mCBs, largest, nil
+				end
+				if id ~= 0x4D then
+					return mCBs, largest, ("bad MCB id %#x at seg %#x"):format(id, seg)
+				end
+				seg += size + 1
+				if seg > m.arenaTop - 1 then
+					return mCBs, largest, ("chain left the arena at seg %#x"):format(seg)
+				end
+			end
+			return mCBs, largest, "MCB chain did not terminate"
+		end
+
+		local function checkArena(m, e, label)
+			const blocks = m.memBlocks
+			const walked, largest, err = walkArena(m)
+			local problems: { string } = {}
+			if err then
+				problems[#problems + 1] = tostring(err)
+			else
+				if #walked ~= #blocks - 1 then
+					problems[#problems + 1] = ("walk saw %d MCBs, block list holds %d"):format(
+						#walked,
+						#blocks - 1
+					)
+				else
+					for i = 2, #blocks do
+						const b = blocks[i]
+						const w = walked[i - 1]
+						if
+							not (w.seg == b.start - 1 and w.owner == b.owner and w.size == b.size)
+						then
+							problems[#problems + 1] = ("MCB %#x {owner %#x size %#x} disagrees with block %#x {owner %#x size %#x}"):format(
+								w.seg,
+								w.owner,
+								w.size,
+								b.start,
+								b.owner,
+								b.size
+							)
+						end
+					end
+					for i = 1, #walked - 1 do
+						if walked[i].owner == 0 and walked[i + 1].owner == 0 then
+							problems[#problems + 1] = ("adjacent free MCBs at %#x and %#x"):format(
+								walked[i].seg,
+								walked[i + 1].seg
+							)
+						end
+					end
+				end
+				const last = walked[#walked]
+				if last.seg + last.size + 1 ~= m.arenaTop then
+					problems[#problems + 1] = ("last MCB %#x+%#x ends at %#x but arenaTop is %#x"):format(
+						last.seg,
+						last.size,
+						last.seg + last.size + 1,
+						m.arenaTop
+					)
+				end
+				if largest ~= m:dosLargest() then
+					problems[#problems + 1] = ("guest walk largest %#x but dosLargest says %#x"):format(
+						largest,
+						m:dosLargest()
+					)
+				end
+			end
+			e(#problems == 0, label .. " -- " .. table.concat(problems, "; "))
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("arena_walk_initial")
+			checkArena(m, e, "fresh machine")
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("dos_free_merge_absorbs_mcb_para")
+			local seg = m:dosAlloc(50)
+			e(m:dosFree(seg), "free failed")
+			e(
+				m.memBlocks[3].start == 0x0801 and m.memBlocks[3].size == 0x7BE,
+				("merge must restore the free run (got %#x paras): the neighbour's MCB paragraph joins it"):format(
+					m.memBlocks[3].size
+				)
+			)
+			checkArena(m, e, "after free merge")
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("dos_resize_grow_absorbs_neighbour")
+			local seg = m:dosAlloc(100)
+			-- grow into the free neighbour so only its MCB paragraph remains:
+			-- DOS hands the whole region over, so the block ends one paragraph
+			-- larger than requested and the chain still reaches arenaTop
+			m.cpu.es = seg
+			m.cpu.r[4] = 100 + 0x759
+			Dos.FN[0x4A](m.dos, m.cpu, m)
+			e(not m.cpu:getF(1), "exact grow failed")
+			e(
+				m.memBlocks[3].size == 0x7BE,
+				("exact grow must absorb the neighbour MCB paragraph (got %#x)"):format(
+					m.memBlocks[3].size
+				)
+			)
+			checkArena(m, e, "exact grow")
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("dos_resize_grow_keeps_arena_top")
+			-- the probe's first mutation: DOSX grows the PSP block 0x1000 into
+			-- the free tail; the tail must still end at arenaTop afterwards
+			m.cpu.es = 0x1000
+			m.cpu.r[4] = 4112
+			Dos.FN[0x4A](m.dos, m.cpu, m)
+			e(not m.cpu:getF(1), "grow failed")
+			local tail = m.memBlocks[6]
+			e(
+				tail.start == 0x2011 and tail.size == m.arenaTop - 0x2011,
+				("free tail %#x+%#x must still end at arenaTop %#x"):format(
+					tail.start,
+					tail.size,
+					m.arenaTop
+				)
+			)
+			checkArena(m, e, "psp grow")
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("dos_resize_shrink_merges_free_tail")
+			local seg = m:dosAlloc(100)
+			m.cpu.es = seg
+			m.cpu.r[4] = 40
+			Dos.FN[0x4A](m.dos, m.cpu, m)
+			e(not m.cpu:getF(1), "shrink failed")
+			e(#m.memBlocks == 7, "freed tail must merge with the following free block")
+			e(
+				m.memBlocks[4].owner == 0 and m.memBlocks[4].size == 0x7BE - 40 - 1,
+				("shrink remainder must merge with the free neighbour (got %#x+%#x)"):format(
+					m.memBlocks[4].start,
+					m.memBlocks[4].size
+				)
+			)
+			checkArena(m, e, "shrink merge")
+		end
+
+		do
+			local m = mkMachine()
+			local e = expect("arena_stress_chain_coherence")
+			local seed = 0x1234ABCD
+			local function nextValue(n)
+				seed = bit32.bxor(seed, bit32.lshift(seed, 13))
+				seed = bit32.bxor(seed, bit32.rshift(seed, 17))
+				seed = bit32.bxor(seed, bit32.lshift(seed, 5))
+				return seed % n
+			end
+			local function blockAt(seg)
+				for _, block in m.memBlocks do
+					if block.start == seg then
+						return block.size
+					end
+				end
+				return nil
+			end
+			local function resize(seg, newSize)
+				m.cpu.es = seg
+				m.cpu.r[4] = newSize
+				Dos.FN[0x4A](m.dos, m.cpu, m)
+			end
+			local owned = {}
+			for step = 1, 240 do
+				local op = nextValue(10)
+				local seg = #owned > 0 and owned[nextValue(#owned) + 1] or nil
+				if op < 4 or #owned == 0 then
+					local allocated = m:dosAlloc(nextValue(1200) + 1)
+					if allocated then
+						owned[#owned + 1] = allocated
+					end
+				elseif op < 6 then
+					for i, candidate in owned do
+						if candidate == seg then
+							table.remove(owned, i)
+							break
+						end
+					end
+					m:dosFree(seg)
+				elseif op < 9 then
+					local size = blockAt(seg)
+					if size then
+						resize(seg, nextValue(size + 300))
+					end
+				else
+					local size = blockAt(seg)
+					if size then
+						m:dosReserve(seg, nextValue(size + 300) + 1)
+					end
+				end
+				checkArena(m, e, ("stress step %d op %d seg %s"):format(step, op, tostring(seg)))
+			end
+			e(#owned > 0, "stress must hold live blocks at the end")
+			checkArena(m, e, "stress final")
+		end
+	end
+
+	do
 		local m = mkMachine()
 		local e = expect("dos_env_trailer")
 		m:loadCOM(buffer.fromstring("\205\32"), nil, "C:\\WINDOWS\\WIN.COM")

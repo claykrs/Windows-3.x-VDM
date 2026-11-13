@@ -21,7 +21,9 @@ export type Host = {
 	pspSeg: number?,
 	deps: any,
 	memBlocks: { { start: number, size: number, owner: number } },
+	lastChildCode: number?,
 	exit: (self: any, code: number) -> (),
+	dosTerminate: (self: any, cpu: any, code: number) -> boolean,
 	dosAlloc: (self: any, paras: number) -> number?,
 	dosReserve: (self: any, start: number, paras: number) -> boolean,
 	dosSetOwner: (self: any, seg: number, owner: number) -> boolean,
@@ -255,8 +257,8 @@ end
 
 Dos.FN = {} :: { [number]: Handler }
 
-Dos.FN[0x00] = function(_self, _cpu, machine)
-	machine:exit(0)
+Dos.FN[0x00] = function(_self, cpu, machine)
+	machine:dosTerminate(cpu, 0)
 end
 
 Dos.FN[0x01] = function(_self: Dos, cpu: any, machine: Host) -- read key with echo
@@ -913,7 +915,8 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 	for index, block in machine.memBlocks do
 		if block.start == segment then
 			if block.size >= newSize then
-				-- shrink / same: carve the remainder into a free block
+				-- shrink / same: carve the remainder into a free block and
+				-- merge it with a following free block, like DOS does
 				if block.size >= newSize + 2 then
 					const rest = {
 						start = block.start + newSize + 1,
@@ -922,6 +925,11 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 					}
 					block.size = newSize
 					table.insert(machine.memBlocks, index + 1, rest)
+					const after = machine.memBlocks[index + 2]
+					if after and after.owner == 0 then
+						rest.size += after.size + 1
+						table.remove(machine.memBlocks, index + 2)
+					end
 					machine:syncArena()
 				end
 				ok(cpu)
@@ -930,11 +938,20 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 				const next = machine.memBlocks[index + 1]
 				if next and next.owner == 0 and block.size + 1 + next.size >= newSize then
 					const spare = next.size + block.size - newSize
-					block.size = newSize
-					if spare >= 2 then
+					if spare >= 1 then
+						block.size = newSize
 						next.start = block.start + newSize + 1
-						next.size = spare - 1
+						-- the neighbour keeps the paragraphs from its new MCB
+						-- paragraph through its old end: exactly `spare` of
+						-- them, or the chain ends one paragraph short of the
+						-- arena top
+						next.size = spare
 					else
+						-- the remainder is only the neighbour's MCB paragraph
+						-- (or nothing): DOS hands the whole region over
+						if spare == 0 then
+							block.size = newSize + 1
+						end
 						table.remove(machine.memBlocks, index + 1)
 					end
 					machine:syncArena()
@@ -1076,7 +1093,14 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 end
 
 Dos.FN[0x4C] = function(_self: Dos, cpu: any, machine: Host)
-	machine:exit(al(cpu))
+	machine:dosTerminate(cpu, al(cpu))
+end
+
+-- AH=4D: get the last child's return code. AL = the termination manner
+-- (00h normal, 01h ctrl-break, 03h stay-resident), AH = the exit code the
+-- child passed to AH=4Ch / INT 20h.
+Dos.FN[0x4D] = function(_self: Dos, cpu: any, machine: Host)
+	cpu:wr(1, bor(band(machine.lastChildCode or 0, 0xFF), 0x0000))
 end
 
 -- Undocumented DOS "create child PSP" (used by EXEC and by KERNEL's own

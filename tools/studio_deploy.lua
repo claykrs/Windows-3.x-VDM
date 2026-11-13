@@ -15,7 +15,7 @@
 const fs = require("@lune/fs")
 const process = require("@lune/process")
 
-const STUDIO_ID = process.env.VDM_STUDIO_ID or "45da683b-c6f3-410f-b964-e7c6e4444f26"
+const STUDIO_ID = process.env.VDM_STUDIO_ID or "1de8c2a0-c7c8-47e1-b7bc-f10038977f1d"
 
 local chunk = process.args[1] or "reinit"
 local single = process.args[2]

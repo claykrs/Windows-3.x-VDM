@@ -7,6 +7,45 @@ const DosTests = {}
 function DosTests.run(mkMachine, expect)
 	do
 		local m = mkMachine()
+		local e = expect("dosx_terminate_resumes_parent")
+		-- R11: with the DOSX PM handoff done, terminating the RM shell jumps
+		-- to the PSP:000A parent resume address instead of ending the machine.
+		m.cpu.dosxResident = true
+		m.pspSeg = m.pspSeg or 0x1000
+		local beforeExit = m.exitCode
+		m.mem:write16(m.pspSeg * 16 + 0x0A, 0x1861)
+		m.mem:write16(m.pspSeg * 16 + 0x0C, 0x010B)
+		Dos.FN[0x00](m.dos, m.cpu, m)
+		e(beforeExit == nil and m.exitCode == nil, "machine must keep running")
+		e(
+			m.cpu.cs == 0x010B and m.cpu.ip == 0x1861,
+			string.format("resume at %04X:%04X", m.cpu.cs, m.cpu.ip)
+		)
+	end
+
+	do
+		local m = mkMachine()
+		local e = expect("dos_plain_terminate_exits")
+		-- without the PM handoff, terminate still ends the machine (3.0a path)
+		Dos.FN[0x00](m.dos, m.cpu, m)
+		e(m.exitCode == 0, "plain terminate exits with code 0")
+	end
+
+	do
+		local m = mkMachine()
+		local e = expect("dosx_terminate_without_resume_exits")
+		-- DOSX resident but no parent address recorded: fail safe to exit
+		m.cpu.dosxResident = true
+		m.pspSeg = m.pspSeg or 0x1000
+		m.mem:write16(m.pspSeg * 16 + 0x0A, 0)
+		m.mem:write16(m.pspSeg * 16 + 0x0C, 0)
+		m.cpu.r[1] = 0x4C
+		Dos.FN[0x4C](m.dos, m.cpu, m)
+		e(m.exitCode == 0x4C, "missing resume falls back to exit with AL code")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_clock_advances")
 		m.mem:write16(0x46C, 0)
 		Dos.FN[0x2C](m.dos, m.cpu, m)

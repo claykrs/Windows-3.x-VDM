@@ -109,6 +109,8 @@ export type Cpu = {
 	osegReg: string?,
 	rep: number?,
 	defaultInts: { [number]: InterruptHandler },
+	-- set when a PM guest flips back to real mode (DOSX resident; R11)
+	dosxResident: boolean?,
 	stubSeg: number?,
 	intStubs: { [number]: { seg: number, off: number } },
 	tripleFaults: number,
@@ -580,6 +582,11 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 				cr0 = self.cr0,
 			}
 			self.cr0 = band(self.cr0, bit32.bnot(1)) -- clear PE → real mode
+			-- A PM→RM switch with the LDT active is the DOSX-resident state
+			-- (R11): later RM terminates must resume the PM kernel.
+			if self.ldtr ~= 0 then
+				self.dosxResident = true
+			end
 			self.cs = selector
 			self.ip = offset
 			self.es, self.ds, self.fs, self.gs = selector, selector, selector, selector
@@ -1785,53 +1792,35 @@ H[0xCF] = function(cpu: any) -- IRET
 	-- PM↔RM execution switch: if we saved PM state on a far transfer to an
 	-- RM segment, and the IRET target selector looks like a PM selector
 	-- (has LDT/GDT bit set or maps to a descriptor), restore the PM state.
-	if cpu.pmSaved and (csSel < 0x0064 or band(csSel, 4) ~= 0) then
+	-- The IRET must be running in real mode (PE=0) for this to be a genuine
+	-- RM→PM return: a PM→PM IRET (e.g. the DOSX supervisor's 0x78→0x5B
+	-- privilege transition) also targets low selectors and must pop its
+	-- frame's SS:SP normally instead of restoring a stale snapshot (R12).
+	if cpu.pmSaved and band(cpu.cr0, 1) == 0 and (csSel < 0x0064 or band(csSel, 4) ~= 0) then
 		local pm = cpu.pmSaved
 		cpu.pmSaved = nil
 		cpu.cr0 = pm.cr0
 		cpu:loadSeg("cs", csSel)
 		cpu:loadSeg("ss", pm.ss)
+		-- Real 286 IRET reloads the ES/DS/FS/GS descriptor caches from the
+		-- descriptors, so limits grown via DPMI SetDesc while in RM take
+		-- effect on return. Restore register values from the snapshot, but
+		-- re-read the caches through loadSeg.
 		cpu.es = pm.es
 		cpu.ds = pm.ds
 		cpu.fs = pm.fs
 		cpu.gs = pm.gs
+		cpu:loadSeg("es", pm.es)
+		cpu:loadSeg("ds", pm.ds)
+		cpu:loadSeg("fs", pm.fs)
+		cpu:loadSeg("gs", pm.gs)
 		cpu.r[5] = pm.sp
-		cpu.segBase.es = pm.segBase.es
-		cpu.segBase.ds = pm.segBase.ds
-		cpu.segBase.ss = pm.segBase.ss
-		cpu.segBase.fs = pm.segBase.fs
-		cpu.segBase.gs = pm.segBase.gs
-		cpu.segBase.cs = pm.segBase.cs or lshift(csSel, 4)
-		cpu.segLimit.es = pm.segLimit.es
-		cpu.segLimit.ds = pm.segLimit.ds
-		cpu.segLimit.ss = pm.segLimit.ss
-		cpu.segLimit.fs = pm.segLimit.fs
-		cpu.segLimit.gs = pm.segLimit.gs
-		cpu.segLimit.cs = 0xFFFF
-		cpu.segAccess.es = pm.segAccess.es
-		cpu.segAccess.ds = pm.segAccess.ds
-		cpu.segAccess.ss = pm.segAccess.ss
-		cpu.segAccess.fs = pm.segAccess.fs
-		cpu.segAccess.gs = pm.segAccess.gs
-		cpu.segSel.es = pm.segSel.es
-		cpu.segSel.ds = pm.segSel.ds
-		cpu.segSel.ss = pm.segSel.ss
-		cpu.segSel.fs = pm.segSel.fs
-		cpu.segSel.gs = pm.segSel.gs
-		if pm.segExpand then
-			cpu.segExpand.es = pm.segExpand.es
-			cpu.segExpand.ds = pm.segExpand.ds
-			cpu.segExpand.ss = pm.segExpand.ss
-			cpu.segExpand.fs = pm.segExpand.fs
-			cpu.segExpand.gs = pm.segExpand.gs
-		end
-		if pm.segUpper then
-			cpu.segUpper.es = pm.segUpper.es
-			cpu.segUpper.ds = pm.segUpper.ds
-			cpu.segUpper.ss = pm.segUpper.ss
-			cpu.segUpper.fs = pm.segUpper.fs
-			cpu.segUpper.gs = pm.segUpper.gs
-		end
+		-- All segment caches (base/limit/access/expand/upper/sel) come from
+		-- the loadSeg calls above, re-read from descriptor memory so any
+		-- limit changes made while in RM are honored. The snapshot's cached
+		-- values would stomp the fresh ones (pm.segBase.cs was never saved,
+		-- so the old `or lshift(csSel, 4)` fallback aliased PM selectors to
+		-- selector*16 and sent execution into linear garbage — R12).
 		cpu.gdtr = pm.gdtr
 		cpu.ldtr = pm.ldtr
 		cpu.ldtrBase = pm.ldtrBase
@@ -2504,12 +2493,18 @@ local function larLsl(cpu: any, isLar: boolean)
 	const selector = cpu:readRM16(e)
 	const desc = readDescriptor(cpu, selector)
 	if not desc then
-		cpu:setbits(ZF, true)
+		-- Intel semantics: ZF = 1 when the descriptor is valid and loaded,
+		-- ZF = 0 when the selector is invalid/out of bounds. KRNL286 gates its
+		-- selector-validation helper on `lar ax,sel / jne invalid`.
+		cpu:setbits(ZF, false)
 		return
 	end
 	local value
 	if isLar then
-		value = bor(lshift(desc.access, 8), band(desc.flags, 0xF0))
+		-- Access rights byte lands in AH; the low byte stays clear (the 286
+		-- exposes nothing below the access byte and a 16-bit 386 LAR masks
+		-- the granularity byte out).
+		value = lshift(desc.access, 8)
 	else
 		value = desc.limit
 	end
@@ -2518,7 +2513,7 @@ local function larLsl(cpu: any, isLar: boolean)
 	else
 		cpu:wr(e.reg, band(value, 0xFFFF))
 	end
-	cpu:setbits(ZF, false)
+	cpu:setbits(ZF, true)
 end
 
 local function movControl(cpu: any, op: number)
@@ -2542,6 +2537,13 @@ local function movControl(cpu: any, op: number)
 		const value = if cpu.operand32 then cpu:rr32(e.rm) else cpu:rr(e.rm)
 		if op == 0x22 then
 			if e.reg == 0 then
+				-- A protected-mode guest dropping back to real mode after the
+				-- DOSX handoff marks the RM terminate path (R11): the PM
+				-- kernel stays resident, so later DOS terminates must resume
+				-- it rather than end the machine.
+				if band(cpu.cr0, 1) ~= 0 and band(value, 1) == 0 then
+					cpu.dosxResident = true
+				end
 				cpu.cr0 = value
 			else
 				cpu.cr[e.reg] = value
@@ -2731,6 +2733,11 @@ H0F[0x01] = function(cpu: any)
 		end
 	elseif reg == 6 then
 		const value = cpu:readRM16(e)
+		-- LMSW is the 286's classic PM exit path: dropping PE with the LDT
+		-- active marks the DOSX-resident RM terminate state (R11).
+		if band(cpu.cr0, 1) ~= 0 and band(value, 1) == 0 then
+			cpu.dosxResident = true
+		end
 		cpu.cr0 = bor(band(cpu.cr0, 0xFFFF0000), band(value, 0xFFFF))
 	elseif reg == 7 then
 		-- INVLPG: no paging model yet

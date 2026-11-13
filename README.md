@@ -1,5 +1,7 @@
 # RVDM — Windows 3.0a in a Roblox window
 
+[![CI](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/Windows-3.x-VDM) ![License](https://img.shields.io/badge/license-MIT-blue)
+
 RVDM is an 8086 real-mode PC emulator written in Luau that boots the real
 Microsoft Windows 3.0a binaries inside Roblox. `WIN.COM` loads `KERNEL.EXE`,
 the drivers and fonts, then `GDI.EXE` and `USER.EXE`, and the real Program
@@ -30,7 +32,7 @@ executing on the emulated CPU. The public repository is
 - PC speaker: the 8254 channel-2 divisor (ports 0x43/0x42) and the port 0x61
   gate are modelled; the host replays an optional short beep on state changes.
 - The gate `lune run tools/check.lua` passes: stylua, selene (luau + roblox),
-  `luau-analyze --mode=strict`, and 667 test assertions.
+  `luau-analyze --mode=strict`, and 924 test assertions.
 
 ![MS-DOS Executive listing the real c:\windows directory](docs/screenshots/r6-msdos-executive.png)
 
@@ -142,7 +144,7 @@ property of Microsoft; supply your own copy to run it.
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)): a stylua format
 check, selene lint over core/tools/tests plus a Roblox-config pass,
 `luau-analyze --mode=strict` over `core/`, and the test suite — currently
-667 assertions.
+924 assertions.
 
 ```powershell
 tools\bin\lune.exe run tools/check.lua
@@ -172,20 +174,27 @@ Application compatibility is verified with the harness and documented in
 The 286 protected-mode track (real `DOSX.EXE` + `KRNL286.EXE`) is actively
 being finished. Where it stands:
 
-- **Done:** the PM core (GDT/LDT/IDT/TSS, ring transitions, PM↔RM switching
-  with full state save/restore), the XMS driver, and the boot chain —
-  `WIN.COM` EXECs WSWAP and DOSX cleanly, DOSX claims extended memory,
-  relocates its PM image, and KRNL286 executes in protected mode.
-- **Just fixed:** the boot's silent stall was the CPU executing zeroed memory.
-  Root cause: the kernel EXEC's XMS ownership handoff orphaned DOSX's PM
-  image, and WSWAP's swap-block allocation (low-first) landed on the same
-  bytes and zeroed the code. Allocation is now top-first and the handoff is
-  pinned by tests (`3836f1f`).
-- **Being finished now:** the kernel's first protected-mode fault — a `#GP`
-  on an LDT selector (`es=03F7`, offset `0xF4D0` beyond limit `0x5AF`) at
-  step ~144k. Tracing that selector's provenance (a wrong or truncated LDT
-  entry, or a fixup that did not apply) is the current frontier; after it,
-  the kernel continues PM initialization toward USER/GDI 3.1.
+- **Done:** the PM core (GDT/LDT/IDT/TSS, expand-down data segments, ring
+  transitions, PM↔RM switching with full state save/restore), the XMS driver
+  (top-first allocation), and the boot chain — `WIN.COM` EXECs WSWAP and
+  DOSX cleanly, DOSX claims extended memory, relocates its PM image, and
+  KRNL286 executes in protected mode.
+- **Solved arcs R9-R12:** LAR/LSL ZF semantics (`6557b2e`), guest MCB-chain
+  coherence (`f2ef54e`), DOSX-resident terminate-vs-continue (`3091c20`),
+  the IRET pmSaved restore (re-read segment caches via `loadSeg`, drop the
+  `csSel<<4` alias stomp, `78433f7`), and the missing PE gate on the
+  pmSaved branch (`706d5cb`) plus INT 21h AH=4D. The boot now passes its
+  old 168k wall and runs **4M steps fault-free**: DOSX EXEC'd, KRNL286
+  EXEC'd, and KRNL286's protected-mode phase running with WIN.COM's second
+  stage alive.
+- **Being finished now:** KRNL286's PM phase polls WIN.COM's RM callback
+  work bits (`cs:[0x18C] & 0x3F` in WIN.COM's block) that nothing sets
+  yet — the current frontier is WIN.COM's INT 21h handler post-processing
+  (`25ec92e` in HANDOFF.md has the full evidence chain).
+
+Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
+[docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
+targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
 
 Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
 [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
