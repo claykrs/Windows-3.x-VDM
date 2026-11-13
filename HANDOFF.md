@@ -477,23 +477,67 @@ all three candidates falsified, two new structural facts.**
   (owner 1, size 0xFFFF, next 0x277) and maps pool pieces through it. The
   pool collision is invariant to the EXEC block sizing.
 
-Next session (R12 part 3 continued): the stub (0x5B:0x000A) is the
-published re-entry by design and its probe region (image+0x2971..0x2A84)
-must survive; the pool always lands at image_start+0x15B0. The two remaining
-mechanisms to test, in order: (1) **the DOSX glue's INT 2Fh handler
-(0x1861:0x97B)** — KRNL286's RM phase makes DOS calls through it (the DPMI
-host's RM services); trace whether the real handler redirects/sub-allocates
-KRNL286's memory requests away from the image tail (hook the glue handler's
-entry and log its INT 21h traffic with results — our FN[0x48] wrapper only
-sees calls that reach the core); (2) **the second re-entry's target** — the
-0C9B glue publishes the stub, but check what the glue's PM-entry variable
-holds and who writes it (`--trace-9b` GL9BCODE shows the region zeroed at
-run end — the 162000 "execution" at 0C9B:2D8B is the slide through zeros,
-so the glue's real code lives elsewhere; find the actual jump site). If
-neither yields: reconsider whether the resident tail is SUPPOSED to be
-re-copied by the glue before publishing the re-entry (the loader's 0x3540
-copy routine is re-runnable — its second invocation would rebuild the tail
-from the intact staging at 0x29420).
+**R12 part 3 fourth pass (2026-11-13): the added check + the trampoline
+mechanism fully decoded — the crash is a stale DGROUP stack slot, and the
+EMB dispatch already happens.**
+
+- **Added check answered: the pool limit 0x408F is guest-constant.** The
+  pool-init (image C46C..C4EA) computes the size from `mov ax,0x4000` plus
+  fixed 0x72/0x2F header allowances: cx = (0x72+0x4000+0x2F)&0xFFE0 = 0x40A0,
+  paras = 0x40A>>4 - 1 = **0x409**, limit = 0x408F, zero = 0x4090 bytes.
+  No emulation value feeds it: on real HW (INT 2Fh 1600 → AL==3) [0x324] bit
+  0x20 is SET so the LSL path is skipped → 0x4000; in our boot (AL≠3) bit
+  0x20 is clear but cs:[0x32]==0 → also 0x4000. The only divergent path
+  ((limit+1)/2 via cs:[0x32]) can't trigger at pool-init time in either
+  environment. The 16KB pool at image_start+0x15B0 is invariant.
+- **The second re-entry's real chain (retro ring at the stub entry,
+  probeAI/probeU)**: the PM supervisor at 0078:0B16-0B50 (GDT[0x78] =
+  resident image) → `push 0x4B; push ax(sp=0xF0); pushf|0x3000; push 0x5B;
+  push 0xB51; iret` → the trampoline 0x5B:0B51 (`cmp [0x134],3; jb 0xB60`)
+  → **`ret` pops the return address from SS:SP = 0x4B:0xF0** — the IRET is a
+  privilege-change IRET (pops ip/cs/flags/**sp/ss** — the five pushed words
+  are correct 286 semantics). The popped value at the 162000 pass =
+  **0x0000** → cs stays 0x5B → lands on the image header (0x5B:0000 = the
+  0x1436/0x05FE/0x125E words executed as code — slide-start #1) → walks to
+  the stub at 0x000A → the stub runs (ax=0x1436, ds=ss=0x1436, sp=0x100) →
+  `call +0x2956` → 0x2971 clobbered → slide-start #2 → the fault.
+- **The trampoline pass history (probe `--trace-ret`, TRAMP lines)**:
+  44000 ×2 (sp=0xF8/0xFE, targets 0x3579 = the loader's gate-return and
+  0x0077 — the loader phase-1 works), 108000/110000 (sp=0x4276, target
+  0x07ED — the KRNL286-era PM callback returns), 112000 ×2 (sp=0xFE →
+  0x00D8 = the glue's ljmp 0x53:0x00BF; **sp=0xE8 → 0x11DD = the 0x11B0
+  overlay-switch block's `ljmp 0x53:0x3B07` — the EMB dispatch DID happen
+  in our boot, via the 0x11B0 NetBIOS-variant block**), 162000 (sp=0xFE0 →
+  0x0000 → the header). Each trampoline ret pops whatever the 0x4B stack
+  holds at the SP the supervisor's IRET frame supplied.
+- **The 162000 pass's stack slot (0x4B:0xFE0 = linear 0x15340) holds the
+  decompressed DGROUP's initial zero** — no pass ever wrote a return address
+  there; the supervisor's IRET frame supplied SP=0xFE0, pointing at a slot
+  nobody initialized. On real hardware the same guest code reads the same
+  slot — so either the real supervisor's frame supplies a different SP
+  (the 0x68-stack's SP at 0B40 is set by whoever entered the supervisor),
+  or the slot is initialized by code that our flow never executed
+  (candidates: the clobbered region's PM code 0x2971..0x35EC, or the
+  loader's phase-2 state that depends on the INT 2Fh 1607/5Ch environment).
+- Probe additions: `--trace-ret` (TRAMP trampoline passes with raw stack
+  dumps + SLOT writer watch on 0x14440..0x14470). The earlier runs' lesson:
+  the step hook must guard the sparse first invocation (`self.r`/`self.es`),
+  inner blocks must re-declare locals (`bx` resolves to a nil global), and
+  formatted stack strings must not be re-fed to `%04X`.
+
+Next session (R12 part 3 continued): the crash is now a **stale/never-written
+DGROUP stack slot (0x4B:0xFE0 = 0x15340) consumed by the supervisor's IRET
+frame at the second re-entry**. Work backwards from the supervisor: who
+enters 0078:0B0E-0B16 at the 162000 resume (the glue's 0x191 path ends at
+INT 21h AH=50 + the INT 2Fh restore — it does NOT reach the supervisor), so
+find the actual 0x78-entry caller (hook cs==0x78 ip==0x0B0E/0x0B16 entries
+with retro) and what sets the 0x68-stack SP that becomes the IRET frame's
+SP pointer; then determine what the 0x4B:0xFE0 slot should hold on real
+hardware (the KRNL286-phase PM code that writes it — possibly inside the
+clobbered region — or a DGROUP-stack contract the loader establishes in
+phase 1). Also still open: whether the loader's 0x3540 copy is re-run on
+real HW before the re-entry (trace reads of staging 0x29420..0x2A00C after
+step 128000 — none observed so far).
 
 
 ## Current state (2026-11-03, R7)
