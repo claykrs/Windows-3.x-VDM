@@ -441,25 +441,59 @@ published PM-entry target — the DOSX stub IS the published re-entry (its
 `mov ax,0x1436; ... call +0x2956` runs `or ax,ax` on the QEMM probe result
 every time), and the probe at image+0x2971 is clobbered at that point.
 
-Next session (R12 part 3 continued): the paradox is now pinned to one
-question — **on real hardware, what keeps the pool base (KRNL286 PSP+0x20)
-clear of the image tail (image_start+0x15B0..+0x35EC)?** Candidates in order:
-(a) KRNL286's PSP is NOT keep_end+1 on real hardware — the strongest
-evidence is the R10-era note `KRNL286 PSP 0x1426` (= DOSX's own PSP, pool at
-0x1446 = kept DGROUP, no collision) — trace what machine.pspSeg was during
-the R10-era KRNL286 phase and whether the core repointed it on the EXEC;
-(b) the pool base conversion is not PSP+0x20 when the environment differs —
-KRNL286 reads PSP:02h (top of memory) through the DPMI mode-switch ES at
-image C94D (`mov di,es:[2]` after `mov es,ax+0x10`), and our EXEC gives
-bound-NE children `math.max(minimumParas, dosLargest)` (PSP:02 = 0xA000 vs
-the DOS-faithful 0x2B0B for maxalloc=0) — gated, since 3.0a KERNEL.EXE also
-has maxalloc=0 and needs the big block; (c) the staging copy at 0x29420
-survives the pool (0x19BF0..0x1DC80 ends below it) — check whether the real
-second re-entry re-copies the resident image tail from staging before the
-stub's `call +0x2956` (no re-copy happens in our boot: IMGMAP at fault still
-ends at +0x175C). Useful traces added: `--trace-kexec` (MCB walk before/
-after EXEC, AL, param block, command tail, INT22 state), plus the earlier
-`--trace-1607/--trace-68/--trace-alloc`.
+**R12 part 3 third pass (2026-11-13): the elimination sweep is complete —
+all three candidates falsified, two new structural facts.**
+
+- **(c) FALSIFIED**: no re-copy. The post-128000 image-region writes
+  (`--trace-9b` RECOP) are exclusively KRNL286's own pool sub-arena header
+  at linear 0x19BC0 (`4D`, owner 1, size 0xFFFF, next 0x277 — written by
+  02EF:B18B..B1A1). No staging read/copy rebuilds the resident tail; IMGMAP
+  at fault still ends at +0x175C.
+- **(a) DEAD**: the R10-era `KRNL286 PSP 0x1426` is a mislabel — the
+  R10-era arena (`1426+1CAF:1426 30D6+1000:8`) shows the DOSX block unshrunk
+  and **no KRNL286 child block**: the R10-era boots died at the 162k
+  terminate and never EXEC'd KRNL286.EXE. The 0x1426 value was the
+  DOSX-phase current pspSeg. The KRNL286 EXEC is new in the post-R11 flow,
+  so the R10-era evidence says nothing about KRNL286's real placement.
+  Also dead: "cs53 got further" — the R10-era boots died at the same
+  terminate; cs=0x53 (EMB, 0x3EB920) runs in OUR boots too as the DPMI/
+  selector service host (retro at the 13BBF call: 0053:2146-21CA).
+- **(b) REFUTED**: KRNL286 reads PSP:02h through the DPMI mode-switch ES
+  (image C94D `mov di,es:[2]`), but the derived selector (0x3CF, limit
+  0xEFAF) is INVARIANT across PSP:02 = 0x2B0B/0x2B0C/0x2B10/0x2B20 (probe
+  sweep with a consistent arena shrink: block 0x116F paras, free from
+  PSP:02). The PSP:02 patch REGRESSES the boot (168k -> 152k, a new failure
+  mode) — do not pursue EXEC resizing for this.
+- **NEW structural fact 1**: KRNL286's RM phase builds its own PSP at
+  segment 0x0C9B (linear 0xC9B0, inside the freed low region 0x9280..0xFBF0)
+  at step 154000, and its PSP INT22 is pointed at the DOSX stub (0x5B:0x000A)
+  — the published re-entry. The R11-era "wild-return" (cs 0x0C9B:0x3650 ->
+  linear 0x10000 = that era's child PSP:0000) was a wrong-segment slide that
+  landed there, not a deliberate jump; the R11-era dump_r11_rmglue.bin is
+  actually that era's child env+PSP, not glue code.
+- **NEW structural fact 2**: the "segment 0x19BC" DPMI AX=0002 conversion is
+  the pool's OWN sub-arena MCB paragraph (linear 0x19BC0) inside KRNL286's
+  EXEC block — KRNL286 sub-allocates its own block with a private MCB chain
+  (owner 1, size 0xFFFF, next 0x277) and maps pool pieces through it. The
+  pool collision is invariant to the EXEC block sizing.
+
+Next session (R12 part 3 continued): the stub (0x5B:0x000A) is the
+published re-entry by design and its probe region (image+0x2971..0x2A84)
+must survive; the pool always lands at image_start+0x15B0. The two remaining
+mechanisms to test, in order: (1) **the DOSX glue's INT 2Fh handler
+(0x1861:0x97B)** — KRNL286's RM phase makes DOS calls through it (the DPMI
+host's RM services); trace whether the real handler redirects/sub-allocates
+KRNL286's memory requests away from the image tail (hook the glue handler's
+entry and log its INT 21h traffic with results — our FN[0x48] wrapper only
+sees calls that reach the core); (2) **the second re-entry's target** — the
+0C9B glue publishes the stub, but check what the glue's PM-entry variable
+holds and who writes it (`--trace-9b` GL9BCODE shows the region zeroed at
+run end — the 162000 "execution" at 0C9B:2D8B is the slide through zeros,
+so the glue's real code lives elsewhere; find the actual jump site). If
+neither yields: reconsider whether the resident tail is SUPPOSED to be
+re-copied by the glue before publishing the re-entry (the loader's 0x3540
+copy routine is re-runnable — its second invocation would rebuild the tail
+from the intact staging at 0x29420).
 
 
 ## Current state (2026-11-03, R7)
