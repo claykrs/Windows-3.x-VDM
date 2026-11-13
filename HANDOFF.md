@@ -640,7 +640,28 @@ Also: the WIN.COM dispatcher entries do NOT happen at cs=0x1000 ip=0x0D19
 ds=0x125E matches). The next probe must watch cs=0x125E ip=0x0D19-0x0D35
 for the dispatcher entries and the callback caller.
 
-Next session (R12 part 4 continued): the fork is resolved — the table is
+**R12 part 4 fourth pass (2026-11-13): the 4B00 callback is TRANSIENT —
+the 1.2M-4M stall is a DIFFERENT loop.** The CB4B00 tracker (`--trace-68h`)
+shows the 4B00 callback at step 10000 (during WIN.COM phase 1, right after
+the WSWAP EXEC): it enters the scan loop at 1000:0D34, walks a few entries,
+finds a FALSE match in garbage memory (some address containing 0x4B00),
+exits via the handler-jump, and the boot CONTINUES (no fault at 400k). The
+caller is at 0EB6:0E7F (from the ret on the stack). The 1.2M-4M "stall" is
+at cs=0x125E (an LDT selector, KRNL286's PM phase) offset 0x61C-0x6E9 — a
+completely different loop, NOT the callback scan. The LDT descriptor for
+0x125E is zero at 400k/1.5M (the LDT is re-created mid-run), so the code
+must be dumped via --dump-cs or the descriptor captured at the right
+moment.
+
+Next session (R12 part 4 continued): diagnose the cs=0x125E offset
+0x61C-0x6E9 loop that stalls the boot at 1.2M-4M. This is KRNL286's PM
+phase (the LDT selector 0x125E maps to a KRNL286 segment). Dump the
+executing code (--dump-cs captures cs:ip and the segment head — but only
+for the LAST cs, which may be 0x1000 not 0x125E — extend --dump-cs or add
+a dedicated cs=0x125E ip-dump), identify the loop's exit condition, and
+determine whether it's a wait-for-something loop (waiting for the PM→RM
+callback result, a semaphore, or a status flag we don't set) or an
+emulation bug (a wrong comparison or a missing event). — the table is
 byte-correct (only one copy exists; no 4B00) and the EXEC was never routed
 through WIN.COM's INT 21h hook (the scan's INT 21h vector is our core's
 default stub). The spin is a PM→RM callback with AX=0x4B00 dispatched into
