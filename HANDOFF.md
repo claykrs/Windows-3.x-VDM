@@ -269,13 +269,45 @@ missing-resume fallback). Gate: 928 assertions, CHECK PASSED.
 Result: the boot now continues past the terminate (step 162k) into the
 kernel's next phase and reaches step 176k before the new frontier:
 
-**R12**: `#GP ds selector 0427 offset FFF0 size 1 exceeds limit 21EF` — the
-PM kernel reads at ds:0xFFF0 past a 0x21EF-limit LDT selector. Likely a
-segment-limit grow the kernel performs via a Set-Descriptor call, or an
-HMA-style wrap access our 286 selector model rejects. Next step: trace which
-guest code performs the 0x427:0xFFF0 access and what limit the descriptor
-should have (probe with --trace-dosxrm; the LDTW hooks capture every
-descriptor write, so compare the 0x427 descriptor's limit before/after).
+**R12 — PART 1 SOLVED (cpu: pm-restore reread)**: the 0x427:0xFFF0 fault was
+NOT a descriptor-limit problem. Chain: (a) the IRET pmSaved restore path
+stomped `segBase.cs = pm.segBase.cs or lshift(csSel, 4)` — pm.segBase.cs was
+never snapshotted, so every restore aliased the PM code selector (0x5B, GDT
+entry 0x58 base 0x18610) to csSel*16 = 0x5B0 and execution dove into linear
+garbage (environment strings) until a stray [ds:0xFFF0] faulted; (b) stale
+`segLimit/segAccess` restores could also shadow DPMI-era limit grows. Fix: the
+restore now re-reads ALL segment caches via `loadSeg` (correct 286 IRET
+cache-reload semantics) and the snapshot stomp lines are gone. Gate: CHECK
+PASSED.
+
+**R12 — PART 2 (frontier): DOSX PM image truncated at 0x175C bytes.** With
+the restore fixed, PM re-entry (1861 glue -> LMSW -> jmp 0x78:0B0E -> jmp
+0x5B:0B51) runs the DOSX PM stub at image 0x18610: header words
+0x1436/0x05FE/0x125E, code from +0x000A (mov ax,0x1436; mov ds,ax; mov
+ss,ax; mov sp,0x100; call +0x2956). That call lands at image offset 0x2971
+which is ZERO in our memory (real content ends at +0x175C; a 14KB zero sea
+follows), so execution slides through `add [bx+si],al` until a data byte
+`03 6D 0B` faults on [ds:0xFFF7] (ds=0x427 limit 0x21EF — the descriptor
+itself is faithful; the access is from garbage execution). Evidence:
+- DOSX.EXE is now staged at C:\WINDOWS\DOSX.EXE (stage_install31.py root
+  list; probe previously logged `OPEN FAIL C:\WINDOWS\dosx.exe`). The guest
+  opens it and EXECs it (32682 bytes, MZ cblp=0x1AA cp=0x40 hdr=0x200 ->
+  load image 0x7DAA) but the image at 0x18610 is still only 0x175C bytes.
+- The 0x18610 image was populated BEFORE the disk file existed, by WIN.COM's
+  embedded-copy path; the sub-routine region was never written by anyone
+  (write-watch on 0x1AF80 shows only early zero-fills at 1133:0E3A step 8000
+  and 30D4:0093 step 14000).
+- Probe instrumentation in media/win31/probe31.lua (gitignored): IMGW writes
+  to 0x19610, BNDW nonzero writes 0x19D60+, DOSXW 0x1AF80, SLIDE START
+  detector, LOADSEG cs=5B spy, event log + 1200-entry retro ring, FAULTCPU/
+  FAULTDESC/FAULTCODE/FAULTGDT/FAULTJMP dumps. Probe run:
+  `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
+  --steps 400000`.
+Next: determine how WIN.COM's loader builds the dosx resident image (who
+writes the first 0x175C bytes, why the copy stops, and whether the EXEC'd
+DOSX.EXE load image should BE the aliased image — i.e. GDT[0x58] base should
+point at the full EXEC'd copy, or the loader's size/address computation is
+off).
 
 
 ## Current state (2026-11-03, R7)

@@ -1798,47 +1798,25 @@ H[0xCF] = function(cpu: any) -- IRET
 		cpu.cr0 = pm.cr0
 		cpu:loadSeg("cs", csSel)
 		cpu:loadSeg("ss", pm.ss)
+		-- Real 286 IRET reloads the ES/DS/FS/GS descriptor caches from the
+		-- descriptors, so limits grown via DPMI SetDesc while in RM take
+		-- effect on return. Restore register values from the snapshot, but
+		-- re-read the caches through loadSeg.
 		cpu.es = pm.es
 		cpu.ds = pm.ds
 		cpu.fs = pm.fs
 		cpu.gs = pm.gs
+		cpu:loadSeg("es", pm.es)
+		cpu:loadSeg("ds", pm.ds)
+		cpu:loadSeg("fs", pm.fs)
+		cpu:loadSeg("gs", pm.gs)
 		cpu.r[5] = pm.sp
-		cpu.segBase.es = pm.segBase.es
-		cpu.segBase.ds = pm.segBase.ds
-		cpu.segBase.ss = pm.segBase.ss
-		cpu.segBase.fs = pm.segBase.fs
-		cpu.segBase.gs = pm.segBase.gs
-		cpu.segBase.cs = pm.segBase.cs or lshift(csSel, 4)
-		cpu.segLimit.es = pm.segLimit.es
-		cpu.segLimit.ds = pm.segLimit.ds
-		cpu.segLimit.ss = pm.segLimit.ss
-		cpu.segLimit.fs = pm.segLimit.fs
-		cpu.segLimit.gs = pm.segLimit.gs
-		cpu.segLimit.cs = 0xFFFF
-		cpu.segAccess.es = pm.segAccess.es
-		cpu.segAccess.ds = pm.segAccess.ds
-		cpu.segAccess.ss = pm.segAccess.ss
-		cpu.segAccess.fs = pm.segAccess.fs
-		cpu.segAccess.gs = pm.segAccess.gs
-		cpu.segSel.es = pm.segSel.es
-		cpu.segSel.ds = pm.segSel.ds
-		cpu.segSel.ss = pm.segSel.ss
-		cpu.segSel.fs = pm.segSel.fs
-		cpu.segSel.gs = pm.segSel.gs
-		if pm.segExpand then
-			cpu.segExpand.es = pm.segExpand.es
-			cpu.segExpand.ds = pm.segExpand.ds
-			cpu.segExpand.ss = pm.segExpand.ss
-			cpu.segExpand.fs = pm.segExpand.fs
-			cpu.segExpand.gs = pm.segExpand.gs
-		end
-		if pm.segUpper then
-			cpu.segUpper.es = pm.segUpper.es
-			cpu.segUpper.ds = pm.segUpper.ds
-			cpu.segUpper.ss = pm.segUpper.ss
-			cpu.segUpper.fs = pm.segUpper.fs
-			cpu.segUpper.gs = pm.segUpper.gs
-		end
+		-- All segment caches (base/limit/access/expand/upper/sel) come from
+		-- the loadSeg calls above, re-read from descriptor memory so any
+		-- limit changes made while in RM are honored. The snapshot's cached
+		-- values would stomp the fresh ones (pm.segBase.cs was never saved,
+		-- so the old `or lshift(csSel, 4)` fallback aliased PM selectors to
+		-- selector*16 and sent execution into linear garbage — R12).
 		cpu.gdtr = pm.gdtr
 		cpu.ldtr = pm.ldtr
 		cpu.ldtrBase = pm.ldtrBase
