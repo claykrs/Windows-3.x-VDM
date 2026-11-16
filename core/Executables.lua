@@ -141,6 +141,7 @@ function Executables.loadCOM(
 	const stackTop = math.min((stackParas or 0xFF) * 16 - 2, 0xFFFE)
 	cpu.r[5] = stackTop
 	machine.pspSeg = segment
+	machine.terminated[segment] = nil -- a freshly loaded program is live again
 	machine.exitCode = nil
 	return segment
 end
@@ -221,6 +222,7 @@ function Executables.loadMZ(
 	cpu.cs = loadSeg + cs
 	cpu.ip = ip
 	machine.pspSeg = segment
+	machine.terminated[segment] = nil -- a freshly loaded program is live again
 	machine.exitCode = nil
 	return segment
 end
@@ -682,6 +684,7 @@ function Executables.loadNE(machine: any, bytes: buffer): number
 	const mem = machine.mem
 	const pspSeg = 0x1000
 	machine.pspSeg = pspSeg
+	machine.terminated[pspSeg] = nil
 	buildPSP(mem, pspSeg)
 
 	const cpu = machine.cpu

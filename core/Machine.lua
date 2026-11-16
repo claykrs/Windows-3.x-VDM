@@ -79,6 +79,7 @@ export type Machine = {
 	pendingInt: number?,
 	exitCode: number?,
 	lastChildCode: number?,
+	terminated: { [number]: boolean },
 	timerInterval: number,
 	timerPhase: number,
 	arenaTop: number,
@@ -456,6 +457,7 @@ function Machine.new(deps: Deps, config: Config?): Machine
 	-- MCB paragraphs sit one paragraph BEFORE each block in emulated memory:
 	-- [0]=M/Z [1..2]=owner [3..4]=size.
 	self.arenaTop = 0xA000
+	self.terminated = {}
 	self.memBlocks = {
 		{ start = 0x0000, size = 0x0050, owner = 8 }, -- IVT + BDA (no MCB)
 		{ start = 0x0051, size = 0x07AF, owner = 8 }, -- DOS data: SFT/list of lists
@@ -930,7 +932,15 @@ function Machine.dosTerminate(self: Machine, cpu: any, code: number): boolean
 		-- x86 far-pointer layout in the PSP: offset at +0A, segment at +0C
 		const off = self.mem:read16(base + 0x0A)
 		const seg = self.mem:read16(base + 0x0C)
-		if seg ~= 0 then
+		-- A process that already terminated once and was never re-launched is
+		-- the root: its INT 22h address is its own exit path, so resuming it
+		-- again only loops (WIN.COM's 1861:0215 repeated AH=4Ch 23,684 times
+		-- after the kernel exited 0xFF). A default INT 22h pointing at the
+		-- PSP's own INT 20h has no parent to resume either.
+		const rootAgain = self.terminated[psp] == true
+		const selfLoop = seg == psp and off == 0
+		if seg ~= 0 and not rootAgain and not selfLoop then
+			self.terminated[psp] = true
 			cpu.cs = seg
 			cpu.ip = off
 			return true

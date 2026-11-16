@@ -25,6 +25,40 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dosx_root_terminate_does_not_loop")
+		-- WIN.COM's exit path terminated through its own INT 22h address over
+		-- and over after the kernel child exited 0xFF. The first terminate may
+		-- resume the recorded address; a second one from the same live-less PSP
+		-- is the root and must end the machine with its exit code.
+		m.cpu.dosxResident = true
+		m.pspSeg = 0x1861
+		m.mem:write16(m.pspSeg * 16 + 0x0A, 0x0215)
+		m.mem:write16(m.pspSeg * 16 + 0x0C, 0x1861)
+		m.cpu.r[1] = 0x4CFF
+		Dos.FN[0x4C](m.dos, m.cpu, m)
+		e(
+			m.exitCode == nil and m.cpu.cs == 0x1861 and m.cpu.ip == 0x0215,
+			"first terminate resumes"
+		)
+		Dos.FN[0x4C](m.dos, m.cpu, m)
+		e(m.exitCode == 0xFF, "second terminate from the same PSP exits the machine")
+	end
+
+	do
+		local m = mkMachine()
+		local e = expect("dosx_terminate_default_int22_exits")
+		-- a PSP whose INT 22h still points at its own INT 20h has no parent
+		m.cpu.dosxResident = true
+		m.pspSeg = 0x1234
+		m.mem:write16(m.pspSeg * 16 + 0x0A, 0)
+		m.mem:write16(m.pspSeg * 16 + 0x0C, m.pspSeg)
+		m.cpu.r[1] = 0x4C07
+		Dos.FN[0x4C](m.dos, m.cpu, m)
+		e(m.exitCode == 7, "default INT 22h exits with the AL code")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_plain_terminate_exits")
 		-- without the PM handoff, terminate still ends the machine (3.0a path)
 		Dos.FN[0x00](m.dos, m.cpu, m)
