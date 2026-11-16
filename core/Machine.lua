@@ -1159,14 +1159,15 @@ function Machine.shutdownResume(self: Machine, cpu: any)
 			const es = cpu:pop16()
 			cpu:loadSeg("ds", ds)
 			cpu:loadSeg("es", es)
-			const ax = cpu:pop16()
-			const cx = cpu:pop16()
-			const dx = cpu:pop16()
-			const bx = cpu:pop16()
-			cpu:pop16() -- PUSHAW's saved SP is ignored by POPA
-			const bp = cpu:pop16()
-			const si = cpu:pop16()
+			-- POPAW order: DI, SI, BP, (SP skipped), BX, DX, CX, AX
 			const di = cpu:pop16()
+			const si = cpu:pop16()
+			const bp = cpu:pop16()
+			cpu:pop16() -- PUSHAW's saved SP is ignored by POPA
+			const bx = cpu:pop16()
+			const dx = cpu:pop16()
+			const cx = cpu:pop16()
+			const ax = cpu:pop16()
 			cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[4] = ax, cx, dx, bx
 			cpu.r[6], cpu.r[7], cpu.r[8] = bp, si, di
 			const ip = cpu:pop16()

@@ -1113,6 +1113,41 @@ T("pm_shutdown_09_restores_frame", {
 	end,
 })
 
+T("pm_shutdown_09_popaw_register_order", {
+	config = LEVEL_286,
+	steps = 0,
+	setup = function(m)
+		fresh(m)
+		m.cpu.cr0 = 1
+		m.cmos[0x0F] = 0x09
+		m.mem.a20 = true
+		m.xms.a20 = true
+		m.mem:write16(0x467, 0x00DE)
+		m.mem:write16(0x469, 0x340D)
+		m.mem:write16(0x341AE, 0x340D) -- saved DS
+		m.mem:write16(0x341B0, 0x340D) -- saved ES
+		-- PUSHAW stores AX highest and DI lowest, so POPAW (and the BIOS
+		-- shutdown-9 return) reads DI, SI, BP, SP, BX, DX, CX, AX in order.
+		local frame = { 0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888 }
+		for index, value in ipairs(frame) do
+			m.mem:write16(0x341B2 + (index - 1) * 2, value)
+		end
+		m.mem:write16(0x341C2, 0x0C13)
+		m.mem:write16(0x341C4, 0x3838)
+		m.mem:write16(0x341C6, 0x0046)
+	end,
+	check = function(m, cpu, expect)
+		m:shutdownResume(cpu)
+		expect(cpu.r[8] == 0x1111, "DI=" .. string.format("%04X", cpu.r[8]))
+		expect(cpu.r[7] == 0x2222, "SI=" .. string.format("%04X", cpu.r[7]))
+		expect(cpu.r[6] == 0x3333, "BP=" .. string.format("%04X", cpu.r[6]))
+		expect(cpu.r[4] == 0x5555, "BX=" .. string.format("%04X", cpu.r[4]))
+		expect(cpu.r[3] == 0x6666, "DX=" .. string.format("%04X", cpu.r[3]))
+		expect(cpu.r[2] == 0x7777, "CX=" .. string.format("%04X", cpu.r[2]))
+		expect(cpu.r[1] == 0x8888, "AX=" .. string.format("%04X", cpu.r[1]))
+	end,
+})
+
 T("pm_shutdown_0a_preserves_a20", {
 	config = LEVEL_286,
 	steps = 0,
