@@ -1350,6 +1350,33 @@ Dos.FN[0x36] = function(self: Dos, cpu: any, _machine: Host) -- get free disk sp
 	ok(cpu)
 end
 
+-- AH=1B/1C: allocation information for the default/specified drive. Win 3.1
+-- KRNL286 calls 1Ch during startup; DS:BX points at the FAT media-ID byte.
+const MEDIA_ID_OFF = 0x01D1
+local function allocationInfo(self: Dos, cpu: any, machine: Host, drive: number)
+	if drive == 0 then
+		drive = self.defaultDrive + 1
+	end
+	if drive < 1 or drive > 3 then
+		cpu:wb(0, 0xFF) -- AL = FFh: invalid drive
+		return
+	end
+	machine.mem:write8(lshift(Dos.DATA_SEG, 4) + MEDIA_ID_OFF, 0xF8) -- fixed disk
+	cpu:wb(0, 4) -- sectors per cluster
+	cpu.r[2] = 512 -- CX = bytes per sector
+	cpu.r[3] = 0x9000 -- DX = clusters on the drive
+	cpu.r[4] = MEDIA_ID_OFF -- DS:BX -> media ID byte
+	cpu.ds = Dos.DATA_SEG
+end
+
+Dos.FN[0x1B] = function(self: Dos, cpu: any, machine: Host) -- allocation info, default drive
+	allocationInfo(self, cpu, machine, 0)
+end
+
+Dos.FN[0x1C] = function(self: Dos, cpu: any, machine: Host) -- allocation info, drive DL
+	allocationInfo(self, cpu, machine, band(cpu.r[3], 0xFF))
+end
+
 Dos.FN[0x4E] = function(self: Dos, cpu: any, machine: Host) -- find first (DTA)
 	const raw = self:readRawAsciz(cpu)
 	const matched = { string.match(raw, "^(.*)\\([^\\]*)$") }

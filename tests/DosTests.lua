@@ -167,6 +167,23 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_allocation_info_1c")
+		-- Win 3.1 KRNL286 calls AH=1Ch during startup; it must not be an
+		-- unsupported-function error. DS:BX -> media ID byte, CX=bytes/sector.
+		m.cpu.r[1] = 0x1C00
+		m.cpu.r[3] = 0x0003 -- DL = drive C:
+		Dos.FN[0x1C](m.dos, m.cpu, m)
+		e(bit32.band(m.cpu.r[1], 0xFF) == 4, "AL sectors per cluster")
+		e(m.cpu.r[2] == 512, "CX bytes per sector")
+		e(m.cpu.r[3] ~= 0, "DX clusters")
+		e(m.mem:read8(bit32.lshift(m.cpu.ds, 4) + m.cpu.r[4]) == 0xF8, "media ID byte")
+		m.cpu.r[3] = 0x0019 -- DL = drive Y: (not present)
+		Dos.FN[0x1C](m.dos, m.cpu, m)
+		e(bit32.band(m.cpu.r[1], 0xFF) == 0xFF, "invalid drive returns AL=FF")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_country_info")
 		m.cpu.ds = 0x9000
 		m.cpu.r[1] = 0x3800 -- get current country
