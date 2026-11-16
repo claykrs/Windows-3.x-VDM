@@ -54,3 +54,10 @@ tools/cal*.png
 tools/machprobe.json
 tools/raw_console.txt
 tools/test_conn.json
+
+# local MCP/Studio capture artifacts and stray duplicates
+/console.json
+/mcp_result.json
+tools/*.json
+tools/*.png
+tools/studioDeploy.lua
