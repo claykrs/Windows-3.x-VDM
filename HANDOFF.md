@@ -723,6 +723,54 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 eighth pass (2026-11-16): the 0xFF exit was a scrambled-register
+resume, fixed; the machine now boots KRNL286 through SYSTEM.DRV/VGA.DRV/GDI/USER.**
+Why KRNL286 exited 0xFF: its segment-2 loader (`0407:AC0F`, the compaction of
+the not-yet-loaded part of the bound image) read the segment from 0x100 bytes
+too far, so segment 2 (selector 040F) kept its raw linker chain words and a
+cleanup `call far 0C9B:4B9C` (a chain link, not a selector) fell through the PM->RM
+far-transfer hack into zeroed real-mode memory and hit `INT 20h` -> exit. The
+0x100 came from `[5B2] = CX>>4` at `02EF:9A6A`: CX was 0x030F instead of 0x0400.
+Root cause was `Machine.shutdownResume` status 09h (the INT 15h/87h-style PM->RM
+return DOSX uses): it popped the PUSHAW frame as AX,CX,DX,BX,SP,BP,SI,DI but
+PUSHAW stores AX highest, so POPAW order is DI,SI,BP,SP,BX,DX,CX,AX. Every GPR
+came back permuted across each DOSX mode switch (CX/SI swapped etc.). Fixed in
+`2bb9810` (test `pm_shutdown_09_popaw_register_order`).
+Follow-ups the fix exposed, each with a regression test:
+- `39fd3b0` `0F FF` (UD0) on a 286 now delivers INT 6 as a fault (pushed IP =
+  opcode start). KRNL286 installs a #UD handler (DOSX INT 31h AX=0203) and
+  executes `0F FF` on purpose at `0407:9F05`.
+- `e3ab88f` INT 21h AH=1B/1C (allocation information; DS:BX -> media-ID byte)
+  was an "unsupported function" fault at ~334k steps.
+- `aa1a135` `dosTerminate`: a PSP that already terminated once (or whose INT 22h
+  is its own INT 20h) now ends the machine instead of resuming its exit path
+  again (the old 1861:0215 AH=4Ch loop). `Machine.terminated[psp]` is cleared
+  when a program is loaded at that PSP.
+Probe notes (media/win31/probe31.lua, local): new flags `--tail-on-pc SEG:OFF`,
+`--tail-on-write ADDR=VAL`, `--tail-on-cx HEX`, `--trace-triple`, `--trace-farbad
+SEL`, `--trace-dosfn "3F 4B ..."`, `--trace-fileio`, `--watch-range HEX
+--watch-len HEX [--watch-skip SEG:OFF]`, `--ldt-sels "03C7 ..."`.
+Layout facts worth keeping: KRNL286.EXE is a LINK /HIGH bound NE (min/max alloc
+0); the existing top-of-block mapping is right (image cs=8E9C, file start =
+cs*16-0x200, PSP at the bottom of the block; the kernel's heap block 03A7 starts
+at PSP+0x230). Mapping the image at PSP+0x10 instead overlaps the kernel's own
+code with its heap and faults at 130k; do not "fix" it that way. The kernel's
+bootstrap (`GlobalInit` at KRNL286 seg1:B04C, `[5B0]/[5B2]` paragraph math at
+9DD4..9E12) is correct once CX survives the mode switch.
+New frontier (step ~2.61M, `--steps 4000000`): after loading SYSTEM.DRV,
+KEYBOARD.DRV, MOUSE.DRV, VGA.DRV, MMSOUND.DRV, COMM.DRV, VGASYS/OEM/FIX.FON,
+GDI.EXE and USER.EXE, a far return lands at `0407:1AAD`, two bytes past the
+return address its caller pushed (`1AAB`, after `call 1B41` at `1AA8`), i.e.
+mid-instruction (`xor dx,dx` entered at its second byte); the next instruction
+then faults `#GP: ds selector 0427 offset 8F88 exceeds limit 21EF`. The stack
+slot read by `retf 8` at `0407:09AB` holds 1AAD, so something added 2 to a saved
+IP (an exception-resume that skips a 2-byte instruction, e.g. the UD0 style
+handler, or a stale far-call frame) or the frame was corrupted. Next: ring the
+writes to that stack slot (`--watch-range` on the SS:0F0C..0F10 linear address
+at step ~2.60M) to see who stored 0x1AAD, and check whether an exception was
+delivered just before (a #GP currently aborts as a Lua error instead of being
+delivered to the guest IDT, only INT 0/5/6/13 explicit paths deliver).
+
 Next session (R12 part 4 continued): disassemble WIN.COM's INT 21h handler
 at 0x125E:0x05CC (linear 0x126CC = WIN.COM file offset 0x5CC via the
 image-at-0x10100 mapping) — the handler code between offset 0x5CC and the
