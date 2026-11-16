@@ -702,6 +702,27 @@ linear 0x1276C are also WIN.COM's data. The RM callback poll at cs=0x125E:
 0x067C checks WIN.COM's own event bits. The handler at 0x05CC should set
 those bits when DOS calls complete.
 
+**R12 part 4 seventh pass (2026-11-16): the "stall" is a terminate loop, not a
+KRNL286 poll.** Live disassembly of WIN.COM's resident block (segment 0x125E,
+dumped with the probe's new `--dump-lin <hex> --dump-len <n>` flags) shows
+0x125E:0x05FE is the INT **2Fh** handler (AX=4680 present check, 1605/1606
+Windows init/exit broadcast, 4B02, 4B80), not INT 21h. The only setter of the
+event byte cs:[0x18C] is `mov byte cs:[18C],4` on **INT 2Fh AX=4B80**; the
+other writes (0x5C1, 0x922, 0x9E5) clear it. A new `--tally-2f 1` probe flag
+tallies software INT 2Fh and INT 21h AH=4B..4D calls with their callers over
+4M steps: AX=4B80 is **never issued**, but WIN.COM's second stage exit path at
+1861:0215 is reached at ~step 162000 and then repeats **23,684 times**:
+`INT 2F AX=1606 DX=1` -> `INT 21 AX=4D..` -> `INT 21 AX=4CFF`. The last
+EXEC (INT 21 AX=4B00 from 1861:00EF at step 112000) is the child WIN.COM waits
+on; it returns, WIN.COM reports exit code 0xFF and calls AH=4C, and our DOS
+terminate hands control back to the same exit sequence instead of ending the
+root process. So (a) the child (DOSX/KRNL286) is terminating with AL=FFh at
+~162k steps, and (b) the 1.2M-4M "poll at 125E:067C" window is the aftermath of
+that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
+`mov byte cs:[16d],0xFF` error-flag site at 125E:05F3 and DOSX's own exit
+paths), and make AH=4C of the root process stop the machine instead of
+re-entering.
+
 Next session (R12 part 4 continued): disassemble WIN.COM's INT 21h handler
 at 0x125E:0x05CC (linear 0x126CC = WIN.COM file offset 0x5CC via the
 image-at-0x10100 mapping) — the handler code between offset 0x5CC and the
