@@ -114,6 +114,7 @@ export type Cpu = {
 	stubSeg: number?,
 	intStubs: { [number]: { seg: number, off: number } },
 	tripleFaults: number,
+	opIp: number,
 	-- Saved protected-mode segment state while executing a real-mode far
 	-- transfer under DOSX; restored by IRET back to a PM selector.
 	pmSaved: any?,
@@ -240,6 +241,7 @@ function Cpu.new(mem: any, io: Io?, config: any?): Cpu
 	self.stubSeg = nil
 	self.intStubs = {}
 	self.tripleFaults = 0
+	self.opIp = 0
 	self.onTripleFault = nil
 	return self
 end
@@ -2886,6 +2888,13 @@ H[0x0F] = function(cpu: any)
 	const op = cpu:fetch8()
 	const h = H0F[op]
 	if not h then
+		if op == 0xFF and cpu.level == CPU_286 then
+			-- 0F FF is UD0 and Win 3.1 KRNL286 executes it on purpose to prove
+			-- DOSX delivers #UD (INT 6, a fault: pushed IP is the opcode start)
+			cpu.ip = cpu.opIp
+			cpu:interrupt(6)
+			return
+		end
 		error(
 			("unimplemented 0F opcode %02X at %04X:%04X"):format(
 				op,
@@ -2970,6 +2979,7 @@ function Cpu.step(self: Cpu): number
 	self.rep = nil
 	self.operand32 = false
 	self.address32 = false
+	self.opIp = self.ip
 	local op = 0
 	while true do
 		op = self:fetch8()

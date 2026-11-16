@@ -1113,6 +1113,26 @@ T("pm_shutdown_09_restores_frame", {
 	end,
 })
 
+T("ud0_0f_ff_delivers_int6_on_286", {
+	config = LEVEL_286,
+	steps = 3,
+	setup = function(m)
+		-- Win 3.1 KRNL286 executes 0F FF on purpose after installing an INT 6
+		-- handler (DOSX AX=0203). It must vector through INT 6 as a fault
+		-- (pushed IP = the opcode start), not abort emulation.
+		putCode(m, { 0x0F, 0xFF })
+		fresh(m)
+		m.mem:write16(6 * 4, 0x0300)
+		m.mem:write16(6 * 4 + 2, 0x0600)
+		putBytes(m, 0x6000 + 0x300, { 0xF4 })
+	end,
+	check = function(m, cpu, expect)
+		expect(cpu.cs == 0x0600 and cpu.ip == 0x0301, ("at %04X:%04X"):format(cpu.cs, cpu.ip))
+		const sp = cpu.r[5]
+		expect(m.mem:read16(cpu:baseOf("ss") + sp) == 0x0100, "pushed IP is the 0F FF opcode start")
+	end,
+})
+
 T("pm_shutdown_09_popaw_register_order", {
 	config = LEVEL_286,
 	steps = 0,
