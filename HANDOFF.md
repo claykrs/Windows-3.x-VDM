@@ -723,6 +723,40 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 ninth pass (2026-11-16): Windows 3.1 standard mode boots to a drawn
+Program Manager (Main group, Accessories/Games icons, mouse cursor) at ~38M steps.**
+The "return to 1AAD" frontier was not a corrupted IP. The caller was `040F:1AA8`
+(KRNL286 segment 2, selector 040F) and the pushed CS:IP 040F:1AAD was right.
+Selector 040F's LDT descriptor had access 7B (P=0, code) because KRNL286
+demand-loads its segments from its own #NP handler. `Cpu.loadSeg` silently
+"auto-aliased" the not-present selector (cache base = sel*16) without updating the
+CS register, so execution continued at 0407:1AAD. Likewise a far CALL to
+not-present 0417 fell into the PM->RM far-transfer hack and ran zeroed real-mode
+memory to an INT 20h (a clean exit 0 that WIN.COM then turned into 255).
+Fixes (commit f3cb0ed, tests in PmCpuTests/DosTests):
+- New restartable-fault mechanism: `Cpu.fault(n, errorCode)` raises a sentinel
+  that `Cpu.step` (now pcall-wrapped around the handler) catches; it rolls IP to
+  `opIp` and SP to `opSp` and delivers the exception through `Cpu.interrupt`.
+  It is a no-op (returns false, legacy behaviour kept) outside `Cpu.step`, in
+  real mode, or when the guest IDT has no present gate for the vector.
+- Not-present code/data descriptors in `loadSeg` -> #NP (#SS for SS), error code
+  = selector & FFFC; not-present code/gate in `farCall` -> #NP.
+- Segment limit violations in `Cpu.linear` (including expand-down) -> #GP(0)
+  delivered to the guest when IDT gate 13 is present; otherwise still the host
+  "#GP: ... exceeds limit" Lua error. A fault inside a host-side DOS/BIOS handler
+  running within a step is delivered as a fault at the INT instruction.
+- `INT 21h AH=4D` wrote CX instead of AX; WIN.COM's exit path (`mov ah,4D`) then
+  re-terminated with AL=FFh. Now AL = child code, AH = 0.
+Probe (media/win31/probe31.lua, local, git-ignored): `--trace-int4c`,
+`--tail-on-pe-off` (dump the ring at every PE 1->0), `--trace-tail N` ring now
+also prints `ssb=` (SS base); `--watch-range` cap raised to 200000 entries and
+`--trace-dosfn "4C"` dumps the tail ring.
+Remaining after this pass: run to 40M steps shows Program Manager idle (screen
+dumped via `--shot-out`, convert `shot.rgba` 640x480 RGBA). Main group icon
+captions overlap ("File Manager"/"MS-DOS Prompt" rows) - cosmetic, likely VGA
+text/font or the icon-title wrap; no further fault. Boot takes ~11 s of host time
+per 6M steps; Program Manager appears well before 40M.
+
 **R12 part 4 eighth pass (2026-11-16): the 0xFF exit was a scrambled-register
 resume, fixed; the machine now boots KRNL286 through SYSTEM.DRV/VGA.DRV/GDI/USER.**
 Why KRNL286 exited 0xFF: its segment-2 loader (`0407:AC0F`, the compaction of
