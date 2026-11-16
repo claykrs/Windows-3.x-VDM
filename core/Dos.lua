@@ -1096,11 +1096,12 @@ Dos.FN[0x4C] = function(_self: Dos, cpu: any, machine: Host)
 	machine:dosTerminate(cpu, al(cpu))
 end
 
--- AH=4D: get the last child's return code. AL = the termination manner
--- (00h normal, 01h ctrl-break, 03h stay-resident), AH = the exit code the
--- child passed to AH=4Ch / INT 20h.
+-- AH=4D: get the last child's return code.
+-- AL = the exit code the child passed to AH=4Ch / INT 20h, AH = the
+-- termination manner (00h normal, 01h ctrl-break, 03h stay-resident).
 Dos.FN[0x4D] = function(_self: Dos, cpu: any, machine: Host)
-	cpu:wr(1, bor(band(machine.lastChildCode or 0, 0xFF), 0x0000))
+	-- real DOS: AL = the child's return code, AH = termination type (0 normal)
+	setAX(cpu, band(machine.lastChildCode or 0, 0xFF))
 end
 
 -- Undocumented DOS "create child PSP" (used by EXEC and by KERNEL's own

@@ -115,6 +115,11 @@ export type Cpu = {
 	intStubs: { [number]: { seg: number, off: number } },
 	tripleFaults: number,
 	opIp: number,
+	opSp: number,
+	inStep: boolean,
+	faultVector: number?,
+	faultCode: number?,
+	fault: (self: Cpu, n: number, errorCode: number?) -> boolean,
 	-- Saved protected-mode segment state while executing a real-mode far
 	-- transfer under DOSX; restored by IRET back to a PM selector.
 	pmSaved: any?,
@@ -242,6 +247,10 @@ function Cpu.new(mem: any, io: Io?, config: any?): Cpu
 	self.intStubs = {}
 	self.tripleFaults = 0
 	self.opIp = 0
+	self.opSp = 0
+	self.inStep = false
+	self.faultVector = nil
+	self.faultCode = nil
 	self.onTripleFault = nil
 	return self
 end
@@ -401,6 +410,25 @@ function Cpu.ensureSeg(self: Cpu, reg: string)
 	self:loadSeg(reg, selector)
 end
 
+-- Restartable protected-mode exception from inside an instruction handler.
+-- Returns false (caller keeps its legacy behavior) unless Cpu.step is running
+-- and the guest IDT has a present gate for the vector. Otherwise it aborts
+-- the instruction with a sentinel that Cpu.step catches: IP and SP are rolled
+-- back to the instruction start and the exception is delivered as a fault.
+local FAULT_SENTINEL = "cpu-fault-sentinel"
+
+function Cpu.fault(self: Cpu, n: number, errorCode: number?): boolean
+	if not self.inStep or band(self.cr0, 1) == 0 or self.idtr.limit < n * 8 + 7 then
+		return false
+	end
+	if band(self.mem:read8(self.idtr.base + n * 8 + 5), 0x80) == 0 then
+		return false
+	end
+	self.faultVector = n
+	self.faultCode = errorCode
+	error(FAULT_SENTINEL, 0)
+end
+
 function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 	selector = band(selector, 0xFFFF)
 	if reg == nil then
@@ -427,6 +455,11 @@ function Cpu.loadSeg(self: Cpu, reg: string, selector: number)
 		return
 	end
 	const desc = readDescriptor(self, selector)
+	if desc and band(desc.access, 0x80) == 0 and band(desc.access, 0x10) ~= 0 then
+		-- Present bit clear on a real code/data descriptor: #NP (#SS for SS),
+		-- restartable. KRNL286 demand-loads segments from its #NP handler.
+		self:fault(if reg == "ss" then 12 else 11, band(selector, 0xFFFC))
+	end
 	if not desc or band(desc.access, 0x80) == 0 then
 		-- 286 standard mode: DOSX aliases RM segments into PM selectors.
 		-- When a PM selector load targets a raw RM segment (>= 0x100),
@@ -516,6 +549,10 @@ function Cpu.farCall(self: Cpu, selector: number, offset: number, isCall: boolea
 		error("#GP: far transfer with null selector")
 	end
 	const desc = readDescriptor(self, selector)
+	if desc and band(desc.access, 0x80) == 0 and band(desc.access, 0x1F) ~= 0 then
+		-- not-present code segment or gate: #NP, restartable
+		self:fault(11, band(selector, 0xFFFC))
+	end
 	if not desc or band(desc.access, 0x80) == 0 then
 		-- 286 standard mode: a far transfer to a raw RM segment triggers
 		-- the PM→RM execution switch. Clear PE, set CS:IP, and continue
@@ -849,6 +886,7 @@ function Cpu.linear(self: Cpu, reg: string, off: number, size: number): number
 		if self.segExpand[reg] then
 			-- expand-down data: valid offsets are (limit, upper]
 			if off <= limit or off + size - 1 > (self.segUpper[reg] or 0xFFFF) then
+				self:fault(13, 0)
 				const kind = "#GP"
 				error(
 					("%s: %s selector %04X offset %04X size %d below expand-down limit %04X"):format(
@@ -869,6 +907,7 @@ function Cpu.linear(self: Cpu, reg: string, off: number, size: number): number
 			if reg == "ss" then
 				return base + (off % (limit + 1))
 			end
+			self:fault(13, 0)
 			const kind = "#GP"
 			error(
 				("%s: %s selector %04X offset %04X size %d exceeds limit %04X"):format(
@@ -3019,7 +3058,23 @@ function Cpu.step(self: Cpu): number
 			)
 		)
 	end
-	h(self)
+	self.opSp = self.r[5]
+	self.inStep = true
+	const ok, err = pcall(h, self)
+	self.inStep = false
+	if not ok then
+		if err ~= FAULT_SENTINEL then
+			error(err, 0)
+		end
+		-- restartable fault: the handler runs with the pre-instruction IP/SP
+		self.oseg = nil
+		self.osegReg = nil
+		self.rep = nil
+		self.ip = self.opIp
+		self.r[5] = self.opSp
+		self:interrupt(self.faultVector :: number, self.faultCode)
+		return 1
+	end
 	self.oseg = nil
 	self.osegReg = nil
 	self.rep = nil

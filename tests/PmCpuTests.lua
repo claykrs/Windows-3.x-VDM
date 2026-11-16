@@ -1203,4 +1203,114 @@ T("mov_cr0_286_invalid", {
 	end,
 })
 
+-- Protected-mode exception delivery: a ring-0 test rig with a present code
+-- selector 08 (base 6000), data 10, not-present data 18, not-present code 20,
+-- a 0x100-byte data selector 28, and #NP/#SS/#GP interrupt gates that all land
+-- on `POP AX; HLT` at 6000:0400 so the error code ends up in AX.
+local function pmFaultRig(m, code)
+	putCode(m, code)
+	fresh(m)
+	m.mem:write8(0x6400, 0x58) -- POP AX
+	m.mem:write8(0x6401, 0xF4) -- HLT
+	m.cpu.gdtr = { base = 0x7000, limit = 0x3F }
+	m.cpu.idtr = { base = 0x7200, limit = 0x07FF }
+	writeDescriptor(m, 0x7008, 0xFFFF, 0x6000, 0x9A, 0)
+	writeDescriptor(m, 0x7010, 0xFFFF, 0x6000, 0x92, 0)
+	writeDescriptor(m, 0x7018, 0xFFFF, 0x6000, 0x12, 0) -- data, present bit clear
+	writeDescriptor(m, 0x7020, 0xFFFF, 0x6000, 0x1A, 0) -- code, present bit clear
+	writeDescriptor(m, 0x7028, 0x00FF, 0x6000, 0x92, 0)
+	for _, vector in { 11, 12, 13 } do
+		writeGate(m, 0x7200 + vector * 8, 0x0400, 0x0008, 0x8E)
+	end
+	m.cpu.cr0 = 1
+	m.cpu:loadSeg("cs", 0x08)
+	m.cpu:loadSeg("ss", 0x10)
+	m.cpu:loadSeg("ds", 0x10)
+	m.cpu:loadSeg("es", 0x10)
+	m.cpu.ip = 0x100
+	m.cpu.r[5] = 0xFFFE
+end
+
+T("pm_load_ds_not_present_delivers_np", {
+	config = LEVEL_286,
+	steps = 8,
+	setup = function(m)
+		-- MOV AX,0018; MOV DS,AX: the descriptor exists but P=0
+		pmFaultRig(m, { 0xB8, 0x18, 0x00, 0x8E, 0xD8 })
+	end,
+	check = function(m, cpu, expect)
+		expect(cpu.r[1] == 0x0018, "#NP error code=" .. string.format("%04X", cpu.r[1]))
+		expect(cpu.ip == 0x0402, "stopped in handler: " .. string.format("%04X", cpu.ip))
+		const sp = cpu.r[5]
+		expect(m.mem:read16(0x6000 + sp) == 0x0103, "pushed IP is the MOV DS start")
+		expect(m.mem:read16(0x6000 + sp + 2) == 0x0008, "pushed CS")
+		expect(cpu.ds == 0x0010, "DS unchanged by the faulting load")
+	end,
+})
+
+T("pm_far_call_not_present_delivers_np_and_restarts_cleanly", {
+	config = LEVEL_286,
+	steps = 8,
+	setup = function(m)
+		pmFaultRig(m, { 0x9A, 0x00, 0x00, 0x20, 0x00 }) -- CALL FAR 0020:0000
+	end,
+	check = function(m, cpu, expect)
+		expect(cpu.r[1] == 0x0020, "#NP error code=" .. string.format("%04X", cpu.r[1]))
+		const sp = cpu.r[5]
+		-- after the handler popped the code: IP, CS, FLAGS then the old SP
+		expect(sp == 0xFFFE - 6, "SP=" .. string.format("%04X", sp))
+		expect(m.mem:read16(0x6000 + sp) == 0x0100, "pushed IP is the CALL start")
+	end,
+})
+
+T("pm_retf_to_not_present_code_restores_sp", {
+	config = LEVEL_286,
+	steps = 8,
+	setup = function(m)
+		-- push 0020 (selector); push 0000 (offset); retf
+		pmFaultRig(m, { 0x68, 0x20, 0x00, 0x68, 0x00, 0x00, 0xCB })
+	end,
+	check = function(m, cpu, expect)
+		expect(cpu.r[1] == 0x0020, "#NP error code=" .. string.format("%04X", cpu.r[1]))
+		const sp = cpu.r[5]
+		-- RETF popped IP and CS before faulting; they must be pushed back
+		expect(m.mem:read16(0x6000 + sp) == 0x0106, "pushed IP is the RETF")
+		expect(m.mem:read16(0x6000 + sp + 6) == 0x0000, "IP slot still on the stack")
+		expect(m.mem:read16(0x6000 + sp + 8) == 0x0020, "CS slot still on the stack")
+	end,
+})
+
+T("pm_limit_violation_delivers_gp", {
+	config = LEVEL_286,
+	steps = 10,
+	setup = function(m)
+		-- MOV AX,0028; MOV DS,AX; MOV AX,[0200] on a 0x100-byte segment
+		pmFaultRig(m, { 0xB8, 0x28, 0x00, 0x8E, 0xD8, 0xA1, 0x00, 0x02 })
+	end,
+	check = function(m, cpu, expect)
+		expect(cpu.r[1] == 0x0000, "#GP error code=" .. string.format("%04X", cpu.r[1]))
+		const sp = cpu.r[5]
+		expect(m.mem:read16(0x6000 + sp) == 0x0105, "pushed IP is the faulting MOV")
+		expect(cpu.ds == 0x0028, "DS stays the small segment")
+	end,
+})
+
+T("pm_limit_violation_without_gate_stays_host_error", {
+	config = LEVEL_286,
+	steps = 0,
+	setup = function(m)
+		pmFaultRig(m, { 0xB8, 0x28, 0x00, 0x8E, 0xD8, 0xA1, 0x00, 0x02 })
+		m.cpu.idtr = { base = 0x7200, limit = 0 }
+	end,
+	check = function(m, _cpu, expect)
+		local ok, err = pcall(function()
+			m:run(3)
+		end)
+		expect(
+			not ok and string.find(tostring(err), "exceeds limit", 1, true) ~= nil,
+			tostring(err)
+		)
+	end,
+})
+
 return TESTS

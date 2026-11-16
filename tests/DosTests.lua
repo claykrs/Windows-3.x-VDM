@@ -7,6 +7,23 @@ const DosTests = {}
 function DosTests.run(mkMachine, expect)
 	do
 		local m = mkMachine()
+		local e = expect("dos_4d_returns_child_code_in_al")
+		-- WIN.COM calls AH=4Dh after the kernel exits and re-terminates with
+		-- the returned AL; the old handler wrote CX instead of AX and left
+		-- AL=FFh, which turned a clean Windows exit into exit code 255.
+		m.lastChildCode = 0x00
+		m.cpu.r[1] = 0x4DFF
+		m.cpu.r[2] = 0x1234
+		Dos.FN[0x4D](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 0x0000, string.format("AX=%04X", m.cpu.r[1]))
+		e(m.cpu.r[2] == 0x1234, "CX untouched")
+		m.lastChildCode = 0x07
+		Dos.FN[0x4D](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 0x0007, "AL carries the child's exit code")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dosx_terminate_resumes_parent")
 		-- R11: with the DOSX PM handoff done, terminating the RM shell jumps
 		-- to the PSP:000A parent resume address instead of ending the machine.
