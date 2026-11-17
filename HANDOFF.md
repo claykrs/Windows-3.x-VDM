@@ -723,6 +723,25 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 twelfth pass addendum (goal 5, MS-DOS Prompt): EXEC children of WSWAP now return to the caller; the next blocker is memory.**
+`Dos.FN[0x4B]` (AL=0) saves the caller's CS:IP/SS:SP/registers (`execFrames[childPsp]`) when the program is
+`WSWAP.EXE` (or anything started while such a child runs) and `AH=4C` frees the child's blocks (AH=48 blocks it
+allocates are now owned by it), restores the caller, clears CF (also in the stub's IRET frame) and leaves the exit code for
+AH=4D. Other EXECs keep the old load-and-run behaviour, so WIN.COM's own exit path is unchanged. (`cpu.dosxResident` is
+NOT set in this flow, so it cannot be the discriminator.) Test `dos_exec_child_returns_to_caller_when_dosx_resident`.
+New behaviour with `--dosbox 1`: the machine no longer ends when WSWAP exits; WIN.COM main (1000:01BC..01F7) does
+AH=4D, AH=48 BX=FFFF, then tries `dswap.exe` and `wswap.exe` again and prints
+"C:\WINDOWS\system\wswap.exe: Missing/unable to load." forever because `EXEC failed: no 13EB paragraphs (largest 696)`:
+the memory map then is `1426+575/1426` and `199C+8664/199C` (the exited DOSX and Windows kernel PSPs, ~548 KB) never freed,
+plus small blocks owned by them at 8A7/8E8. EXEC now logs the block map on this failure. Next: find which 4C ends the
+kernel (it is not `Machine.dosTerminate`'s dosxResident branch; freeing owner~=0/8 blocks there changed nothing) and free
+the owner's blocks there, then see whether WIN.COM execs COMMAND.COM and what the grabber needs. In real standard mode the
+DOS prompt is a full-screen text session, not a window; the stand-in COMMAND.COM should show `C:\>`. Swap file drive
+(A:) was left alone: the VFS ignores drive letters, so A: is harmless; revisit with TEMP=/SwapDisk if WSWAP checks space.
+Also exercised by mouse: File Manager (double-click on the `system` tree folder re-titles the window
+`C:\WINDOWS\SYSTEM\*.*` with an hourglass; the file pane had not repopulated by the second shot, ~1M steps later) and
+Control Panel (double-click on Date/Time opens the Date & Time dialog correctly).
+
 **R12 part 4 twelfth pass (2026-11-17): guest cursor drift fixed (CPU IMUL bug), Solitaire/Paintbrush/Write/File
 Manager/Control Panel driven by the mouse, three more DOS/CPU gaps closed; MS-DOS Prompt traced to WSWAP.**
 Everything driven only through `machine:keyDown/keyUp/setMouse/syncMouse` via the git-ignored probe

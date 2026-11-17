@@ -56,6 +56,43 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_exec_child_returns_to_caller_when_dosx_resident")
+		-- WINOLDAP's WSWAP.EXE is an EXEC child that must give control back
+		-- to DOSX when it ends; the machine used to exit with code 0.
+		m.vfs:writeFile("C:CHILD.COM", string.char(0xB8, 0x00, 0x4C, 0xCD, 0x21))
+		local cpu = m.cpu
+		cpu.dosxResident = true
+		cpu.cs, cpu.ip, cpu.ss, cpu.r[5] = 0x0700, 0x0123, 0x0710, 0x0400
+		cpu.ds, cpu.es = 0x0720, 0x0720
+		const name = "C:CHILD.COM"
+		for index = 1, #name do
+			m.mem:write8(0x7200 + 0x10 + index - 1, string.byte(name, index))
+		end
+		m.mem:write8(0x7200 + 0x10 + #name, 0)
+		for index = 0, 13 do
+			m.mem:write8(0x7200 + 0x40 + index, 0)
+		end
+		cpu.r[3] = 0x10
+		cpu.r[4] = 0x40
+		cpu.r[1] = 0x4B00
+		Dos.FN[0x4B](m.dos, cpu, m)
+		e(not cpu:getF(1), "exec succeeds")
+		e(cpu.cs ~= 0x0700, "child is running")
+		cpu.r[1] = 0x4C07
+		Dos.FN[0x4C](m.dos, cpu, m)
+		e(m.exitCode == nil, "machine keeps running")
+		e(
+			cpu.cs == 0x0700 and cpu.ip == 0x0123,
+			("back at caller %04X:%04X"):format(cpu.cs, cpu.ip)
+		)
+		e(cpu.ss == 0x0710 and cpu.r[5] == 0x0400, "caller stack restored")
+		cpu.r[1] = 0x4D00
+		Dos.FN[0x4D](m.dos, cpu, m)
+		e(cpu.r[1] % 256 == 7, "child exit code available through AH=4D")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_58_allocation_strategy")
 		-- WINOLDAP (MS-DOS Prompt) saves/restores the allocation strategy;
 		-- AH=58 was an unsupported-function host error.

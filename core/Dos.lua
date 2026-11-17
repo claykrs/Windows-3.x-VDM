@@ -52,6 +52,7 @@ export type Dos = {
 	nextHandle: number,
 	cwd: string,
 	allocStrategy: number,
+	execFrames: { [number]: any },
 	umbLink: number,
 	pendingLine: string?,
 	currentPsp: number?,
@@ -87,6 +88,7 @@ function Dos.new(machine: Host): Dos
 	self.nextHandle = 3
 	self.cwd = "C:\\"
 	self.allocStrategy = 0
+	self.execFrames = {}
 	self.umbLink = 0
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
 	self.currentPsp = nil
@@ -920,12 +922,17 @@ Dos.FN[0x47] = function(self: Dos, cpu: any, machine: Host) -- get cwd -> DS:SI
 	ok(cpu)
 end
 
-Dos.FN[0x48] = function(_self: Dos, cpu: any, machine: Host) -- allocate block (BX paras) -> AX base
+Dos.FN[0x48] = function(self: Dos, cpu: any, machine: Host) -- allocate block (BX paras) -> AX base
 	const segment = machine:dosAlloc(cpu.r[4])
 	if not segment then
 		fail(cpu, 8) -- INSUFFICIENT_MEMORY
 		cpu:wr(3, machine:dosLargest()) -- BX = largest available
 		return
+	end
+	-- blocks a running EXEC child allocates belong to it, so AH=4C frees them
+	const owner = self.currentPsp
+	if owner and self.execFrames[owner] and cpu.r[4] ~= 0 then
+		machine:dosSetOwner(segment, owner)
 	end
 	setAX(cpu, segment)
 	ok(cpu)
@@ -1013,6 +1020,29 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		error(("unsupported EXEC mode AL=%d for %s"):format(mode, path))
 	end
 
+	-- A child of the DOS-box swapper (WINOLDAP's WSWAP.EXE for the
+	-- MS-DOS Prompt, and anything it starts) must hand control back to the EXEC caller when it ends;
+	-- remember where the caller stands. Without DOSX (WIN.COM's own start of
+	-- the kernel) the child keeps the load-and-run behaviour.
+	local callerFrame: any = nil
+	if
+		cpu.dosxResident
+		or string.find(string.upper(path), "WSWAP%.EXE$")
+		or next(self.execFrames) ~= nil
+	then
+		callerFrame = {
+			cs = cpu.cs,
+			ip = cpu.ip,
+			ss = cpu.ss,
+			sp = cpu.r[5],
+			ds = cpu.ds,
+			es = cpu.es,
+			regs = table.clone(cpu.r),
+			viaStub = cpu.stubSeg ~= nil and cpu.cs == cpu.stubSeg,
+			parent = self.currentPsp,
+		}
+	end
+
 	const esbx = lshift(cpu.es, 4) + cpu.r[4]
 	const envSeg = machine.mem:read16(esbx)
 	const cmdOff = machine.mem:read16(esbx + 2)
@@ -1037,6 +1067,7 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	-- DOS allocates a fresh environment block and a fresh program block.
 	const newEnv = machine:dosAlloc(0x40)
 	if not newEnv then
+		machine:log("EXEC failed: no memory for environment")
 		fail(cpu, 8)
 		return
 	end
@@ -1078,6 +1109,17 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	end
 	const pspSeg = machine:dosAlloc(programParas)
 	if not pspSeg then
+		const layout: { string } = {}
+		for _, block in machine.memBlocks do
+			layout[#layout + 1] = ("%X+%X/%X"):format(block.start, block.size, block.owner)
+		end
+		machine:log(
+			("EXEC failed: no %X paragraphs (largest %X) blocks %s"):format(
+				programParas,
+				machine:dosLargest(),
+				table.concat(layout, " ")
+			)
+		)
 		machine:dosFree(newEnv)
 		fail(cpu, 8)
 		return
@@ -1119,6 +1161,10 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		machine.mem:writeString(pspBase + 0x81, tail)
 	end
 	machine.mem:write8(pspBase + 0x81 + #tail, 0x0D)
+	if callerFrame then
+		self.execFrames[pspSeg] = callerFrame
+		self.currentPsp = pspSeg
+	end
 	ok(cpu)
 end
 
@@ -1129,6 +1175,34 @@ end
 -- frees its memory and expects control back after the INT 21h.
 Dos.FN[0x4C] = function(self: Dos, cpu: any, machine: Host)
 	const psp = self.currentPsp
+	const frame = if psp then self.execFrames[psp] else nil
+	if psp and frame then
+		-- EXEC child ends: free its blocks and resume the caller just after
+		-- its INT 21h (through the stub's IRET when the call was chained).
+		self.execFrames[psp] = nil
+		const owned: { number } = {}
+		for _, block in machine.memBlocks do
+			if block.owner == psp then
+				owned[#owned + 1] = block.start
+			end
+		end
+		for _, start in owned do
+			machine:dosFree(start)
+		end
+		machine.lastChildCode = al(cpu)
+		self.currentPsp = frame.parent
+		cpu.cs, cpu.ip, cpu.ss, cpu.ds, cpu.es = frame.cs, frame.ip, frame.ss, frame.ds, frame.es
+		for index = 1, 8 do
+			cpu.r[index] = frame.regs[index]
+		end
+		cpu.r[5] = frame.sp
+		if frame.viaStub then
+			const word = machine.mem:read16(lshift(cpu.ss, 4) + band(frame.sp + 4, 0xFFFF))
+			machine.mem:write16(lshift(cpu.ss, 4) + band(frame.sp + 4, 0xFFFF), band(word, 0xFFFE))
+		end
+		ok(cpu)
+		return
+	end
 	const parent = if psp then self.createdPsps[psp] else nil
 	if psp and parent then
 		self.createdPsps[psp] = nil
