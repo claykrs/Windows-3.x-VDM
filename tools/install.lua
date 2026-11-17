@@ -146,11 +146,14 @@ end
 
 -- First-run window placement: Main open, Accessories and Games minimized as
 -- group icons at the bottom of the desktop.
+-- horizontal pitch of group items: wide enough for system-font captions
+local ITEM_STEP_X = 110
+
 local GROUP_LAYOUTS = {
 	main = {
 		x = 20,
 		y = 20,
-		width = 420,
+		width = 480,
 		height = 190,
 		iconX = 20,
 		iconY = 430,
@@ -158,9 +161,9 @@ local GROUP_LAYOUTS = {
 		columns = 4,
 	},
 	accessories = {
-		x = 70,
+		x = 30,
 		y = 70,
-		width = 460,
+		width = 580,
 		height = 190,
 		iconX = 280,
 		iconY = 430,
@@ -170,7 +173,7 @@ local GROUP_LAYOUTS = {
 	games = {
 		x = 110,
 		y = 110,
-		width = 220,
+		width = 250,
 		height = 120,
 		iconX = 390,
 		iconY = 430,
@@ -486,7 +489,7 @@ function Install.seed(machine)
 							iconPath = "C:\\WINDOWS\\" .. string.upper(iconFile),
 							iconIndex = iconIndex,
 							icon = icon,
-							x = 20 + column * 80,
+							x = 34 + column * ITEM_STEP_X,
 							y = 16 + row * 58,
 						}
 					else
@@ -573,6 +576,47 @@ function Install.writeWinIni(machine)
 		out[#out + 1] = "Documents=txt"
 	end
 	machine.vfs:writeFile("C:\\WINDOWS\\WIN.INI", table.concat(out, "\r\n") .. "\r\n")
+end
+
+-- set key=value inside an existing [section] of an INI text (appends the
+-- section when absent); replaces the key when already present
+function Install.setIniKeyText(
+	text: string,
+	sectionName: string,
+	key: string,
+	value: string
+): string
+	local out = {}
+	local section = ""
+	local found = false
+	local wanted = string.lower(sectionName)
+	local lowerKey = string.lower(key)
+	local function flush()
+		if section == wanted and not found then
+			out[#out + 1] = key .. "=" .. value
+			found = true
+		end
+	end
+	for line in string.gmatch(text, "([^\r\n]*)\r?\n?") do
+		local trimmed = string.gsub(line, "^%s+", "")
+		local name = string.match(trimmed, "^%[(.-)%]")
+		if name then
+			flush()
+			section = string.lower(name)
+		end
+		if section == wanted and string.match(string.lower(trimmed), "^" .. lowerKey .. "%s*=") then
+			out[#out + 1] = key .. "=" .. value
+			found = true
+		else
+			out[#out + 1] = line
+		end
+	end
+	flush()
+	if not found then
+		out[#out + 1] = "[" .. sectionName .. "]"
+		out[#out + 1] = key .. "=" .. value
+	end
+	return table.concat(out, "\r\n") .. "\r\n"
 end
 
 -- set [windows] run= in WIN.INI: the other documented Windows 3.0 auto-start

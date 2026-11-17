@@ -59,6 +59,8 @@ local winIni = fs.readFile(STAGED .. "/WIN.SRC")
 if process.env.WINBOOT_RUN_TETRIS == "1" and fs.isFile(STAGED .. "/TETRIS.EXE") then
 	winIni = Install.setWinIniRunText(winIni, "C:\\WINDOWS\\TETRIS.EXE")
 end
+-- wide enough for the longest VGA system-font group captions ("Print Manager")
+winIni = Install.setIniKeyText(winIni, "Desktop", "IconSpacing", "110")
 local systemIni = configureSystemIni(fs.readFile(STAGED .. "/SYSTEM.SRC"))
 
 -- Program groups are generated, not shipped: run the same install seed into a
