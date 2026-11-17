@@ -723,6 +723,46 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 twelfth pass (2026-11-17): guest cursor drift fixed (CPU IMUL bug), Solitaire/Paintbrush/Write/File
+Manager/Control Panel driven by the mouse, three more DOS/CPU gaps closed; MS-DOS Prompt traced to WSWAP.**
+Everything driven only through `machine:keyDown/keyUp/setMouse/syncMouse` via the git-ignored probe
+(`media/win31/probe31.lua --steps N --key-at 40000000 --script "..."`, many runs in parallel, ~5 min each;
+new local flags `--trace-mouse74`, `--tail-dump`, `--log-int STEP`, `--log-2f`, `--dosbox 1` which seeds a tiny
+stand-in `C:\WINDOWS\COMMAND.COM`, and TEXTBUF output at the end of a run).
+- Cursor drift root cause (`CPU`, not the mouse path): one-operand `IMUL r/m16` (F7 /5) computed DX with
+  truncating division, so negative products left DX=0 instead of FFFFh. MOUSE.DRV scales every PS/2 delta with
+  `imul cx` / `imul [30]` and accumulates in a 32-bit fixed point (`idiv 1000h`), so every leftward or upward
+  packet became +16 counts (+32 px): -5 counts moved the cursor +22 px, a -400 px jump landed at -335. Found by
+  ringing the guest instructions of one INT 74h delivery (decoded packet was right, `imul` result wrong).
+  After the fix a 10 move sequence (+-20..60 px, both axes) lands exactly on the requested pixels. Commit "cpu:
+  one-operand IMUL ..." with test `imul_word_negative_product_sign_extends_dx`.
+- Solitaire: `sync`, then drag Q of spades onto K of hearts (press, three moves with button down, release) moves the
+  card and flips the revealed card; stock click deals three. Paintbrush (`pbrush.exe`) launched after the AH=56 fix
+  and a four-segment mouse drag draws a polyline. Write types text and shows the I-beam cursor.
+- File Manager (`winfile.exe`) now draws the drive bar and C:\WINDOWS listing. It had died with "unhandled interrupt 03
+  at 0000:0025": it probes drive A: with INT 25h (absolute disk read) through DOSX, whose RM reflector far-called
+  IVT[25h] = 0000:0000. INT 25h/26h now point at `F100:00D0/D4` stubs (`INT A5/A6; RETF`) that fail with AX=8002 (drive
+  not ready) and leave the caller's flags on the stack as real DOS does. Test `int25_absolute_disk_read_fails_not_ready`.
+- Control Panel (`control.exe`) renders its icon grid and status line with no fault.
+- Paintbrush needed INT 21h AH=56 (rename), WINOLDAP needs AH=58 (alloc strategy / UMB link): both were
+  unsupported-function host aborts; implemented (`Vfs:rename`, `Dos.allocStrategy`), tests `dos_56_rename_file`,
+  `dos_58_allocation_strategy`.
+- Exit Windows text screen: it is not a VGA bug. After File>Exit Windows the machine ends (exit 0) with mode 3 set
+  and the text buffer at B8000 empty (TEXTBUF nonspace=0) because nothing prints on exit and there is no COMMAND.COM
+  to show a prompt (README: not part of the Windows media). A black text screen is the faithful result.
+- MS-DOS Prompt (standard mode): `command.com` via Run fails with "Cannot find file" without a COMMAND.COM. With a
+  stand-in COM seeded (`--dosbox 1`) WINOLDAP opens COMMAND.PIF/_DEFAULT.PIF (absent, fine), then KRNL286/DOSX EXEC
+  `C:\WINDOWS\SYSTEM\WSWAP.EXE`, which creates `A:\~WOA100F.TMP` (swap file; note drive A:), writes the Windows image,
+  closes it, and ends with `INT 21h AH=4C AL=0`. That terminates the whole machine (exit 0 at ~42.58M) instead of
+  returning to the EXEC caller, because `Dos.FN[0x4B]` is load-and-run: the child PSP's INT 22h is the self-loop
+  `0000:pspSeg`, which `dosTerminate` treats as "root, end machine". Next: give AH=4B AL=0 real return semantics for
+  children started from DOSX/KRNL (save caller SS:SP/CS:IP+flags, restore on AH=4C, CF=0, AX preserved, AH=4D code)
+  without disturbing WIN.COM's own exit path, then see whether DOSX EXECs COMMAND.COM next and what OLIGRAB/the grabber
+  needs (`INT 10h AH=11` was also reported unhandled just before). Also point WSWAP's swap file at a real drive (TEMP=).
+- Write: mouse drag-select highlights text and dragging the title bar moves the window (screenshots checked).
+- Open: File Manager mouse use, Paintbrush
+  tools other than the freehand polyline, and the Control Panel applets are untested.
+
 **R12 part 4 eleventh pass (2026-11-17): interactive Program Manager works - menus, Run, Calculator,
 Notepad, Exit Windows to DOS, mouse clicks/double-clicks.**
 Driven entirely through the emulated machine's own input API (`machine:keyDown/keyUp`,
