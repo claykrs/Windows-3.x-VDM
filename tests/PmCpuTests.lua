@@ -1110,6 +1110,10 @@ T("pm_shutdown_09_restores_frame", {
 		expect(cpu.ds == 0x340D and cpu.es == 0x340D, "DS/ES restored")
 		expect(not m.mem.a20 and not m.xms.a20, "09h must disable A20")
 		expect(m.cmos[0x0F] == 0, "shutdown status cleared")
+		expect(
+			cpu:getF(512) and cpu.irqDelay == 1,
+			"IF set with a one-instruction interrupt shadow"
+		)
 	end,
 })
 

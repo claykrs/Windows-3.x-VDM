@@ -1186,6 +1186,11 @@ function Machine.shutdownResume(self: Machine, cpu: any)
 			cpu:loadSeg("cs", cs)
 			cpu.ip = ip
 			cpu:setbits(512, true) -- SHUT9 executes STI before RET 2
+			-- STI's interrupt shadow: DOSX's resume code at 1861:0C13 starts with
+			-- CLI and still holds the other mode's SS:SP in its [24C0] slot. An
+			-- IRQ taken before that CLI (the mouse INT 74h callback) re-enters
+			-- DOSX and overwrites the slot, so the later IRET lands on 1436:0000.
+			cpu.irqDelay = 1
 		end
 	elseif status == 0x0A then
 		const ip = self.mem:read16(0x467)
