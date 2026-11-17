@@ -93,9 +93,17 @@ function Window.new(title: string, size: UDim2, position: UDim2?): Window
 	content.BorderSizePixel = 0
 	content.Parent = gui
 
+	-- Until the user drags the window it stays centred in its parent: the
+	-- parent's size is not final when the window is first parented, so a one-off
+	-- clamp used to pin it to the top-left corner.
+	local userMoved = false
 	local function clampToViewport()
 		const parent = gui.Parent
 		if not parent or not parent:IsA("GuiObject") then
+			return
+		end
+		if not userMoved and position == nil then
+			gui.Position = UDim2.fromScale(0.5, 0.5)
 			return
 		end
 		const size = gui.AbsoluteSize
@@ -115,6 +123,13 @@ function Window.new(title: string, size: UDim2, position: UDim2?): Window
 		)
 	end
 	task.delay(0.1, clampToViewport)
+	cleaner:Connect(gui:GetPropertyChangedSignal("Parent"), function()
+		const parent = gui.Parent
+		if parent and parent:IsA("GuiObject") then
+			cleaner:Connect(parent:GetPropertyChangedSignal("AbsoluteSize"), clampToViewport)
+		end
+		task.defer(clampToViewport)
+	end)
 
 	-- dragging via the title bar
 	local dragging = false
@@ -131,6 +146,7 @@ function Window.new(title: string, size: UDim2, position: UDim2?): Window
 			or input.UserInputType == Enum.UserInputType.Touch
 		then
 			dragging = true
+			userMoved = true
 			dragStart = input.Position
 			startPosition = gui.Position
 		end
