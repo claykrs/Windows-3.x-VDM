@@ -7,6 +7,29 @@ const DosTests = {}
 function DosTests.run(mkMachine, expect)
 	do
 		local m = mkMachine()
+		local e = expect("dos_4c_on_kernel_created_psp_returns_to_caller")
+		-- KERNEL creates a PSP per task with AH=55h and terminates it with
+		-- AH=4Ch to free its memory. PSP:000A is the parent's (WIN.COM's)
+		-- return address, so jumping there ended Windows on every app exit.
+		m.cpu.dosxResident = true
+		const parent = m.pspSeg or 0x1000
+		m.mem:write16(parent * 16 + 0x0A, 0x0324)
+		m.mem:write16(parent * 16 + 0x0C, 0x1861)
+		m.cpu.r[3] = 0x2849
+		m.cpu.r[7] = 0x9000
+		Dos.FN[0x55](m.dos, m.cpu, m)
+		m.cpu.r[4] = 0x2849
+		Dos.FN[0x50](m.dos, m.cpu, m)
+		m.cpu.cs, m.cpu.ip = 0x0100, 0x0200
+		m.cpu.r[1] = 0x4C00
+		Dos.FN[0x4C](m.dos, m.cpu, m)
+		e(m.exitCode == nil, "machine must keep running")
+		e(m.cpu.cs == 0x0100 and m.cpu.ip == 0x0200, "no jump to the parent's INT 22h address")
+		e(m.dos.currentPsp == parent, "current PSP is the parent again")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_59_get_extended_error")
 		-- KRNL286 calls AH=59h after a failed file operation (Program Manager
 		-- Run of CALC.EXE); it was an unsupported-function host error.

@@ -53,6 +53,7 @@ export type Dos = {
 	cwd: string,
 	pendingLine: string?,
 	currentPsp: number?,
+	createdPsps: { [number]: number },
 	defaultDrive: number,
 	countryCode: number,
 	dtaSeg: number?,
@@ -85,6 +86,7 @@ function Dos.new(machine: Host): Dos
 	self.cwd = "C:\\"
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
 	self.currentPsp = nil
+	self.createdPsps = {}
 	self.defaultDrive = 2 -- C:
 	self.countryCode = 1 -- United States
 	self.ctrlBreak = false
@@ -1096,7 +1098,30 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	ok(cpu)
 end
 
-Dos.FN[0x4C] = function(_self: Dos, cpu: any, machine: Host)
+-- A PSP made by AH=55h (KERNEL's per-task PSP) is not an EXEC child: its
+-- PSP:000A is the parent's return address (WIN.COM), so a real jump there
+-- would end the whole Windows session whenever any app exits (Calculator
+-- Alt+F4 exited with code 0). KERNEL only terminates the task PSP so DOS
+-- frees its memory and expects control back after the INT 21h.
+Dos.FN[0x4C] = function(self: Dos, cpu: any, machine: Host)
+	const psp = self.currentPsp
+	const parent = if psp then self.createdPsps[psp] else nil
+	if psp and parent then
+		self.createdPsps[psp] = nil
+		const owned: { number } = {}
+		for _, block in machine.memBlocks do
+			if block.owner == psp then
+				owned[#owned + 1] = block.start
+			end
+		end
+		for _, start in owned do
+			machine:dosFree(start)
+		end
+		machine.lastChildCode = al(cpu)
+		self.currentPsp = parent
+		ok(cpu)
+		return
+	end
 	machine:dosTerminate(cpu, al(cpu))
 end
 
@@ -1121,6 +1146,7 @@ Dos.FN[0x55] = function(self: Dos, cpu: any, machine: Host)
 	end
 	machine.mem:write16(dst + 0x02, cpu.r[7]) -- SI: top of memory
 	machine.mem:write16(dst + 0x16, parentSeg) -- parent PSP
+	self.createdPsps[childSeg] = parentSeg
 	ok(cpu)
 end
 
