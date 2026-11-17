@@ -305,6 +305,20 @@ T("idiv_word_negative", {
 	end,
 })
 
+T("imul_word_negative_product_sign_extends_dx", {
+	-- MOUSE.DRV scales PS/2 deltas with IMUL r/m16; a negative product left DX
+	-- at 0 (truncating division), so every leftward packet moved the Windows
+	-- cursor 16 counts to the right.
+	setup = function(m)
+		putCode(m, { 0xB8, 0xB0, 0xFF, 0xB9, 0x00, 0x01, 0xF7, 0xE9 }) -- AX=-80, CX=256, IMUL CX
+		fresh(m)
+	end,
+	check = function(_m, cpu, expect)
+		expect(cpu.r[1] == 0xB000, "AX=" .. cpu.r[1]) -- -20480
+		expect(cpu.r[3] == 0xFFFF, "DX=" .. cpu.r[3])
+	end,
+})
+
 -- shifts/rotates
 T("shl1", {
 	setup = function(m)

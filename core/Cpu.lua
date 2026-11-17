@@ -2109,7 +2109,7 @@ local function group3(cpu: any, w: boolean)
 		if w then
 			local prod = sign16(cpu:rr(0)) * sign16(cpu:readRM16(e))
 			cpu:wr(0, band(prod, 0xFFFF))
-			cpu:wr(2, band(truncDiv(prod, 0x10000), 0xFFFF))
+			cpu:wr(2, band(math.floor(prod / 0x10000), 0xFFFF))
 			cpu:setbits(bor(CF, OFLG), prod < -0x8000 or prod > 0x7FFF)
 		else
 			local prod = sign8(cpu:rb(0)) * sign8(cpu:readRM8(e))
