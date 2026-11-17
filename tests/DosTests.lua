@@ -30,6 +30,32 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_56_rename_file")
+		-- Paintbrush renames its temp file on save; AH=56 was an
+		-- unsupported-function host error.
+		local function put(seg: number, off: number, text: string)
+			const base = seg * 16 + off
+			for index = 1, #text do
+				m.mem:write8(base + index - 1, string.byte(text, index))
+			end
+			m.mem:write8(base + #text, 0)
+		end
+		m.vfs:writeFile("C:\\OLD.TMP", "data")
+		put(m.cpu.ds, 0x200, "C:\\OLD.TMP")
+		put(m.cpu.es, 0x300, "C:\\NEW.BMP")
+		m.cpu.r[3] = 0x200
+		m.cpu.r[8] = 0x300
+		m.cpu.r[1] = 0x5600
+		Dos.FN[0x56](m.dos, m.cpu, m)
+		e(not m.cpu:getF(1), "rename succeeds")
+		e(m.vfs:readFile("C:\\NEW.BMP") == "data", "content moved")
+		e(m.vfs:readFile("C:\\OLD.TMP") == nil, "source gone")
+		Dos.FN[0x56](m.dos, m.cpu, m)
+		e(m.cpu:getF(1) and m.cpu.r[1] == 2, "missing source fails with 2")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_59_get_extended_error")
 		-- KRNL286 calls AH=59h after a failed file operation (Program Manager
 		-- Run of CALC.EXE); it was an unsupported-function host error.

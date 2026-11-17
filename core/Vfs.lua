@@ -157,6 +157,25 @@ function Vfs:delete(path: string): (boolean, number?)
 	return true, nil
 end
 
+-- Move/rename a file or directory. Fails (path not found 3, access denied 5)
+-- when the source is missing, the destination exists, or its parent is missing.
+function Vfs:rename(oldPath: string, newPath: string): (boolean, number?)
+	local oldParent, oldName = self:parentOf(oldPath)
+	if not oldParent or not oldName or not oldParent.children[oldName] then
+		return false, 2
+	end
+	local newParent, newName = self:parentOf(newPath)
+	if not newParent or not newName then
+		return false, 3
+	end
+	if newParent.children[newName] then
+		return false, 5
+	end
+	newParent.children[newName] = oldParent.children[oldName]
+	oldParent.children[oldName] = nil
+	return true, nil
+end
+
 function Vfs:setCwd(path: string, cur: string?): (boolean, number?)
 	const abs = self:resolve(path, cur)
 	const node = self:lookup(abs)

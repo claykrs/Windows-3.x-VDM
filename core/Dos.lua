@@ -757,6 +757,26 @@ Dos.FN[0x41] = function(self: Dos, cpu: any, machine: Host) -- delete file
 	end
 end
 
+Dos.FN[0x56] = function(self: Dos, cpu: any, machine: Host) -- rename/move file (DS:DX old, ES:DI new)
+	const oldPath = self:readAsciz(cpu)
+	local chars: { string } = {}
+	const base = lshift(cpu.es, 4) + band(cpu.r[8], 0xFFFF)
+	for index = 0, 255 do
+		const ch = machine.mem:read8(base + index)
+		if ch == 0 then
+			break
+		end
+		chars[#chars + 1] = string.char(ch)
+	end
+	const newPath = machine.vfs:resolve(table.concat(chars), self.cwd)
+	const moved, err = machine.vfs:rename(oldPath, newPath)
+	if not moved then
+		fail(cpu, err or 2)
+	else
+		ok(cpu)
+	end
+end
+
 Dos.FN[0x42] = function(self: Dos, cpu: any, _machine: Host) -- lseek
 	const handle = self.handles[cpu.r[4]]
 	if not handle or handle.console then
