@@ -723,6 +723,28 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 twelfth pass, final state of the MS-DOS Prompt work (standard mode) and the other follow-ups.**
+Findings (probe flags `--log-exec`, `--log-term`, `--ring-first-pc SEG:OFF` are local): WIN.COM (PSP 1000) EXECs
+WSWAP.EXE (PSP 10F0), which EXECs DOSX.EXE (1426), which EXECs KRNL286.EXE (199C): the whole Windows session runs inside nested
+EXECs. When Windows exits for a DOS app, DOSX returns to WIN.COM main (`1000:01BC`) with NO AH=4C for 1426/199C, so their
+blocks stayed owned. WIN.COM's exit/DOS-app loop is `wswap.exe` (swap out, psp 4336) -> `dswap.exe` -> `wswap.exe` (swap
+in) -> message "Fatal exit! Windows cannot be swapped back" -> AH=4C. Fixes (tests in DosTests):
+- `Dos.sessionPsps`: EXEC of `DOSX.EXE`/`KRNL286.EXE` is remembered; when a later EXEC cannot get memory, blocks owned by those
+  PSPs are freed and the EXEC retried (`dos_exec_reclaims_ended_dosx_session_blocks`). DSWAP/WSWAP now load.
+- INT 21h AH=40 after a seek past EOF now zero-fills the gap (it used to drop it, shifting data): WSWAP's swap file header
+  was read back wrong (`dos_write_after_seek_past_eof_zero_fills`). With it WSWAP#2 succeeds, WIN.COM no longer exits, and
+  Windows restarts to a 640x480 graphics screen.
+- Current blocker: after that restart the screen shows "WINOLDAP caused a General Protection Fault in module KRNL286.EXE at
+  0001:713E" and the DOS app (our stand-in COMMAND.COM) never runs: DSWAP is started with an empty tail and only does
+  attrib/delete on `A:\WINDOWS\~WOA100D.TMP`; no COMMAND.COM open is ever seen. Real WSWAP/DSWAP swap the Windows image
+  (XMS/extended memory plus the conventional MCB chain) to the swap file and run the DOS app in between; here WSWAP writes only
+  ~48 KB and the freed kernel blocks are reused by DSWAP/WSWAP loads, so the resumed kernel is corrupt. To finish: dump what
+  the ~WOA file contains (it carries the app command line), make WSWAP/DSWAP see the DOS app request, and make the
+  "freed" Windows memory survive (do not hand 1426/199C ranges out until swap-in, or really implement the swap data path).
+- File Manager: double-clicking a tree folder is slow, not stuck: the `C:\WINDOWS\SYSTEM` listing (467 files) appears after
+  ~8M steps. Paintbrush line and box tools and the Control Panel Color applet were exercised by mouse and work (Color dialog
+  opens; its scheme combo text draws empty).
+
 **KNOWN LIMITATION (twelfth pass, time-boxed follow-up): MS-DOS Prompt does not start in standard mode.**
 Probe flag `--log-term 1` (local) logs every AH=4C / `dosTerminate`: in a whole `command.com` run there is exactly ONE
 AH=4C, WSWAP's own (`1133:0111`, curpsp 4336). The DOSX (PSP 1426) and Windows kernel (PSP 199C, 0x8664 paragraphs)

@@ -53,6 +53,7 @@ export type Dos = {
 	cwd: string,
 	allocStrategy: number,
 	execFrames: { [number]: any },
+	sessionPsps: { [number]: boolean },
 	umbLink: number,
 	pendingLine: string?,
 	currentPsp: number?,
@@ -89,6 +90,7 @@ function Dos.new(machine: Host): Dos
 	self.cwd = "C:\\"
 	self.allocStrategy = 0
 	self.execFrames = {}
+	self.sessionPsps = {}
 	self.umbLink = 0
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
 	self.currentPsp = nil
@@ -744,7 +746,9 @@ Dos.FN[0x40] = function(self: Dos, cpu: any, machine: Host) -- write to handle
 	else
 		const data = handle.data or ""
 		const pos = handle.pos or 0
-		handle.data = string.sub(data, 1, pos) .. text .. string.sub(data, pos + #text + 1)
+		-- DOS fills the gap with zeros when a write follows a seek past EOF
+		const gap = if pos > #data then string.rep("\0", pos - #data) else ""
+		handle.data = string.sub(data, 1, pos) .. gap .. text .. string.sub(data, pos + #text + 1)
 		handle.pos = pos + #text
 		if handle.path then
 			machine.vfs:writeFile(handle.path, handle.data)
@@ -1107,7 +1111,24 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	else
 		programParas = math.max(0x100 + math.ceil(buffer.len(buf) / 16), 0x1000)
 	end
-	const pspSeg = machine:dosAlloc(programParas)
+	local pspSeg = machine:dosAlloc(programParas)
+	if not pspSeg and next(self.sessionPsps) ~= nil then
+		-- The DOSX / KRNL286 session this EXEC chain started has ended (the
+		-- caller is running again) but DOSX leaves for WIN.COM without a DOS
+		-- terminate, so its blocks were never released. Free them now so the
+		-- swapper / DOS box can load, as DOS would have on AH=4C.
+		const stale: { number } = {}
+		for _, block in machine.memBlocks do
+			if self.sessionPsps[block.owner] then
+				stale[#stale + 1] = block.start
+			end
+		end
+		for _, start in stale do
+			machine:dosFree(start)
+		end
+		self.sessionPsps = {}
+		pspSeg = machine:dosAlloc(programParas)
+	end
 	if not pspSeg then
 		const layout: { string } = {}
 		for _, block in machine.memBlocks do
@@ -1126,6 +1147,12 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	end
 	machine:dosSetOwner(newEnv, pspSeg)
 	machine:dosSetOwner(pspSeg, pspSeg)
+	if
+		string.find(string.upper(path), "DOSX%.EXE$")
+		or string.find(string.upper(path), "KRNL286%.EXE$")
+	then
+		self.sessionPsps[pspSeg] = true
+	end
 
 	if isMZ then
 		-- Bound NE images self-relocate, so the MZ image is mapped at the top
@@ -1156,6 +1183,7 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 			tail ..= string.char(machine.mem:read8(cmdBase + index))
 		end
 	end
+	machine:log(("EXEC tail [%s] env %X"):format(tail, inherited))
 	machine.mem:write8(pspBase + 0x80, #tail)
 	if #tail > 0 then
 		machine.mem:writeString(pspBase + 0x81, tail)

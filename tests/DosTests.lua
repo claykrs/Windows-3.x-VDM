@@ -93,6 +93,72 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_write_after_seek_past_eof_zero_fills")
+		-- WSWAP seeks to a large offset in its swap file and writes there; the
+		-- old write dropped the gap, so the data later read back at the
+		-- recorded offset was wrong ("Windows cannot be swapped back").
+		local cpu = m.cpu
+		local name = "C:\\\\GAP.BIN"
+		for index = 1, #name do
+			m.mem:write8(cpu.ds * 16 + 0x300 + index - 1, string.byte(name, index))
+		end
+		m.mem:write8(cpu.ds * 16 + 0x300 + #name, 0)
+		cpu.r[3] = 0x300
+		cpu.r[2] = 0
+		cpu.r[1] = 0x3C00
+		Dos.FN[0x3C](m.dos, cpu, m)
+		local handle = cpu.r[1]
+		cpu.r[4] = handle
+		cpu.r[2] = 0
+		cpu.r[3] = 5
+		cpu.r[1] = 0x4200
+		Dos.FN[0x42](m.dos, cpu, m)
+		m.mem:write8(cpu.ds * 16 + 0x400, 0x41)
+		m.mem:write8(cpu.ds * 16 + 0x401, 0x42)
+		cpu.r[4] = handle
+		cpu.r[2] = 2
+		cpu.r[3] = 0x400
+		cpu.r[1] = 0x4000
+		Dos.FN[0x40](m.dos, cpu, m)
+		local data = m.vfs:readFile("C:\\\\GAP.BIN")
+		e(data ~= nil and #data == 7, "file length " .. tostring(data and #data))
+		e(
+			data ~= nil and string.sub(data, 1, 5) == string.rep(string.char(0), 5),
+			"gap is zero filled"
+		)
+		e(data ~= nil and string.sub(data, 6, 7) == "AB", "data lands at the seek offset")
+	end
+
+	do
+		local m = mkMachine()
+		local e = expect("dos_exec_reclaims_ended_dosx_session_blocks")
+		-- DOSX/KRNL286 leave for WIN.COM without a DOS terminate; WIN.COM's
+		-- next EXEC (DSWAP/WSWAP) failed with "Missing/unable to load".
+		m.vfs:writeFile("C:\\\\SWAP.COM", string.char(0xB8, 0x00, 0x4C, 0xCD, 0x21))
+		local hog = m:dosAlloc(m:dosLargest())
+		e(hog ~= nil, "hog allocated")
+		m:dosSetOwner(hog, 0x4444)
+		m.dos.sessionPsps[0x4444] = true
+		local cpu = m.cpu
+		local name = "C:\\\\SWAP.COM"
+		for index = 1, #name do
+			m.mem:write8(cpu.ds * 16 + 0x10 + index - 1, string.byte(name, index))
+		end
+		m.mem:write8(cpu.ds * 16 + 0x10 + #name, 0)
+		for index = 0, 13 do
+			m.mem:write8(cpu.es * 16 + 0x40 + index, 0)
+		end
+		cpu.es = cpu.ds
+		cpu.r[3] = 0x10
+		cpu.r[4] = 0x40
+		cpu.r[1] = 0x4B00
+		Dos.FN[0x4B](m.dos, cpu, m)
+		e(not cpu:getF(1), "EXEC succeeds after the ended session's blocks are reclaimed")
+		e(next(m.dos.sessionPsps) == nil, "session list cleared")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_58_allocation_strategy")
 		-- WINOLDAP (MS-DOS Prompt) saves/restores the allocation strategy;
 		-- AH=58 was an unsupported-function host error.
