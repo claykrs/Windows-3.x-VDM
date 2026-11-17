@@ -755,7 +755,8 @@ clicks work. Fixes (each with a regression test):
 Open: after launching Calculator by mouse the Windows cursor drifted from the host position in one
 run (cursor ~0.8x of the requested displacement after several moves/clicks; not seen on a clean
 desktop). Not reproduced in isolation; suspect packets coalesced/dropped while the guest is busy
-or MOUSE.DRV acceleration. Next frontier: Solitaire/Games, Write/Paintbrush with the mouse
+or MOUSE.DRV acceleration. SOL.EXE (Run dialog) also launches and deals a correct board with card
+bitmaps (CARDS.DLL), ~12M steps after Enter, no fault. Next frontier: Solitaire play with the mouse, Write/Paintbrush with the mouse
 (drag/paint), File Manager, MS-DOS Prompt (needs a PIF/DOS box in standard mode), Control Panel,
 exit-to-DOS screen contents (text mode), the cursor drift above.
 
