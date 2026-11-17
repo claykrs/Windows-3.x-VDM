@@ -1214,25 +1214,66 @@ function MachineTests.run(mkMachine, expect)
 		end
 		e(buffer.readu32(m.vga.rgba, 0) == sentinel, "region snapshot touched outside pixels")
 
-		-- Write mode 3 is the masked/transparent blit path sprites use: the
-		-- CPU data becomes the mask, the latched source fills set bits, and the
-		-- destination keeps the cleared bits.
+		-- Write mode 3 (VGA spec): the set/reset register is always the
+		-- source (enable ignored), the CPU data ANDed with the bit mask is the
+		-- pixel mask, and unmasked bits keep the latch. Windows' VGA.DRV text
+		-- and mono-bitmap output (Calculator button labels) rely on this.
 		const vga = m.vga
 		vga.misc = bit32.bor(vga.misc, 0x02)
 		vga.gfx[5] = 3
 		vga.gfx[8] = 0xF0
 		vga.gfx[1] = 0
+		vga.gfx[0] = 0x05 -- set/reset: planes 0 and 2 set
+		vga.gfx[3] = 0
 		for plane = 0, 3 do
 			vga.latches[plane] = 0xAA
 			buffer.writeu8(vga.planes[plane + 1], 0, 0x0F)
 		end
 		vga:write8(0xA0000, 0xFF)
 		e(
-			buffer.readu8(vga.planes[1], 0) == 0xAF,
-			("VGA write mode 3 masked merge=%02X"):format(buffer.readu8(vga.planes[1], 0))
+			buffer.readu8(vga.planes[1], 0) == 0xFA and buffer.readu8(vga.planes[2], 0) == 0x0A,
+			("VGA write mode 3 set/reset source p0=%02X p1=%02X"):format(
+				buffer.readu8(vga.planes[1], 0),
+				buffer.readu8(vga.planes[2], 0)
+			)
+		)
+		-- Mode 3 also applies the function select (XOR with the latch).
+		vga.gfx[3] = 0x18
+		vga.gfx[8] = 0xFF
+		for plane = 0, 3 do
+			vga.latches[plane] = 0xAA
+		end
+		vga:write8(0xA0000, 0xFF)
+		e(
+			buffer.readu8(vga.planes[1], 0) == 0x55 and buffer.readu8(vga.planes[2], 0) == 0xAA,
+			"VGA write mode 3 xor function"
+		)
+		-- Write mode 0: set/reset-enabled planes still go through the ALU.
+		vga.gfx[5] = 0
+		vga.gfx[1] = 0x0F
+		vga.gfx[0] = 0x0F
+		vga.gfx[3] = 0x08 -- AND with latch
+		for plane = 0, 3 do
+			vga.latches[plane] = 0x3C
+		end
+		vga:write8(0xA0000, 0x00)
+		e(buffer.readu8(vga.planes[1], 0) == 0x3C, "VGA write mode 0 set/reset then AND")
+		-- Write mode 2: expanded data bit goes through the ALU too.
+		vga.gfx[5] = 2
+		vga.gfx[1] = 0
+		vga.gfx[3] = 0x18 -- XOR
+		for plane = 0, 3 do
+			vga.latches[plane] = 0xFF
+		end
+		vga:write8(0xA0000, 0x01) -- plane 0 data bit set, others clear
+		e(
+			buffer.readu8(vga.planes[1], 0) == 0x00 and buffer.readu8(vga.planes[2], 0) == 0xFF,
+			"VGA write mode 2 xor function"
 		)
 		vga.gfx[5] = 0
 		vga.gfx[8] = 0xFF
+		vga.gfx[3] = 0
+		vga.gfx[0] = 0
 
 		-- Mode 13h uses the linear path; the same region contract applies.
 		m.cpu.r[1] = 0x0013

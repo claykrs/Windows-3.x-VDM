@@ -885,43 +885,38 @@ function Vga.write8(self: Vga, addr: number, value: number)
 	const mapMask = band(self.seq[2], 0x0F)
 	const bitMask = band(self.gfx[8], 0xFF)
 
+	const fn = band(rshift(self.gfx[3], 3), 0x03)
+	const rotated = rotateRight(data, band(self.gfx[3], 0x07))
 	for plane = 0, 3 do
 		if band(mapMask, lshift(1, plane)) ~= 0 then
+			const latch = self.latches[plane]
 			local written: number
 			if mode == 1 then
 				-- Write mode 1: copy the latches; CPU data is ignored.
-				written = self.latches[plane]
-			elseif mode == 2 then
-				-- Write mode 2: one data bit expands to a full plane byte.
-				const source = band(data, lshift(1, plane)) ~= 0 and 0xFF or 0x00
-				written =
-					bor(band(source, bitMask), band(self.latches[plane], band(bnot(bitMask), 0xFF)))
-			elseif mode == 3 then
-				-- Write mode 3: CPU data AND bit mask selects the latched (or
-				-- set/reset) source bits; the destination keeps the rest. This
-				-- is the transparent/masked blit path most Win16 sprites use.
-				const rotated = rotateRight(data, band(self.gfx[3], 0x07))
-				const mask = band(rotated, bitMask)
-				local source: number
-				if band(self.gfx[1], lshift(1, plane)) ~= 0 then
-					source = band(self.gfx[0], lshift(1, plane)) ~= 0 and 0xFF or 0x00
-				else
-					source = self.latches[plane]
-				end
-				const destination = buffer.readu8(self.planes[plane + 1], band(offset, 0xFFFF))
-				written = bor(band(source, mask), band(destination, band(bnot(mask), 0xFF)))
+				written = latch
 			else
-				const rotated = rotateRight(data, band(self.gfx[3], 0x07))
-				const fn = band(rshift(self.gfx[3], 3), 0x03)
+				-- Modes 0/2/3 all feed a per-plane source byte through the
+				-- ALU (function select) against the latch, then merge it
+				-- with the latch under the bit mask.
 				local source: number
-				if band(self.gfx[1], lshift(1, plane)) ~= 0 then
-					-- Set/reset overrides CPU data for this plane.
+				local mask = bitMask
+				if mode == 2 then
+					-- Write mode 2: one data bit expands to a full plane byte.
+					source = band(data, lshift(1, plane)) ~= 0 and 0xFF or 0x00
+				elseif mode == 3 then
+					-- Write mode 3: set/reset (enable ignored) is the source;
+					-- the rotated CPU data ANDed with the bit mask is the mask.
+					source = band(self.gfx[0], lshift(1, plane)) ~= 0 and 0xFF or 0x00
+					mask = band(rotated, bitMask)
+				elseif band(self.gfx[1], lshift(1, plane)) ~= 0 then
+					-- Write mode 0 with enable set/reset: the set/reset bit
+					-- replaces CPU data (the ALU still applies afterwards).
 					source = band(self.gfx[0], lshift(1, plane)) ~= 0 and 0xFF or 0x00
 				else
-					source = applyDataFunction(rotated, self.latches[plane], fn)
+					source = rotated
 				end
-				written =
-					bor(band(source, bitMask), band(self.latches[plane], band(bnot(bitMask), 0xFF)))
+				const result = applyDataFunction(source, latch, fn)
+				written = bor(band(result, mask), band(latch, band(bnot(mask), 0xFF)))
 			end
 			buffer.writeu8(self.planes[plane + 1], band(offset, 0xFFFF), band(written, 0xFF))
 		end
