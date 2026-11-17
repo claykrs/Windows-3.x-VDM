@@ -7,6 +7,30 @@ const DosTests = {}
 function DosTests.run(mkMachine, expect)
 	do
 		local m = mkMachine()
+		local e = expect("dos_59_get_extended_error")
+		-- KRNL286 calls AH=59h after a failed file operation (Program Manager
+		-- Run of CALC.EXE); it was an unsupported-function host error.
+		const base = m.cpu.ds * 16 + 0x200
+		const path = "C:\\NOPE\\NOFILE.TXT"
+		for index = 1, #path do
+			m.mem:write8(base + index - 1, string.byte(path, index))
+		end
+		m.mem:write8(base + #path, 0)
+		m.cpu.r[3] = 0x200
+		m.cpu.r[1] = 0x3D00
+		Dos.FN[0x3D](m.dos, m.cpu, m)
+		m.cpu.r[1] = 0x5900
+		m.cpu.r[4] = 0
+		Dos.FN[0x59](m.dos, m.cpu, m)
+		e(
+			m.cpu.r[1] == 2 or m.cpu.r[1] == 3,
+			string.format("AX=%04X is a not-found code", m.cpu.r[1])
+		)
+		e(math.floor(m.cpu.r[4] / 256) == 8, "class 8 not found")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_4d_returns_child_code_in_al")
 		-- WIN.COM calls AH=4Dh after the kernel exits and re-terminates with
 		-- the returned AL; the old handler wrote CX instead of AX and left

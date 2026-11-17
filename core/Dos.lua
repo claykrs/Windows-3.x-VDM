@@ -205,7 +205,11 @@ local function ok(cpu: any)
 	cpu:setbits(CF, false)
 end
 
+-- Last DOS error code set by `fail`, reported by INT 21h AH=59.
+local lastErrorCode = 0
+
 local function fail(cpu: any, code: number)
+	lastErrorCode = code
 	cpu:setbits(CF, true)
 	setAX(cpu, code)
 end
@@ -1142,6 +1146,31 @@ Dos.FN[0x52] = function(_self: Dos, cpu: any, _machine: Host) -- get list of lis
 	cpu.es = Dos.DATA_SEG
 	cpu.r[4] = Dos.LOL_OFF + 2
 	ok(cpu)
+end
+
+-- Get extended error information: AX = last error, BH = class, BL = suggested
+-- action, CH = locus. KRNL286 calls this after a failed file operation.
+Dos.FN[0x59] = function(_self: Dos, cpu: any, _machine: Host)
+	const code = lastErrorCode
+	local class = 13 -- unknown
+	local action = 1 -- retry
+	if code == 2 or code == 3 or code == 18 then
+		class = 8 -- not found
+		action = 3 -- ask user to re-enter
+	elseif code == 4 or code == 8 then
+		class = 1 -- out of resource
+		action = 4
+	elseif code == 5 then
+		class = 3 -- authorization
+		action = 3
+	elseif code == 6 or code == 1 then
+		class = 7 -- application error
+		action = 3
+	end
+	setAX(cpu, code)
+	cpu.r[4] = bor(lshift(class, 8), action) -- BH:BL
+	cpu.r[2] = bor(band(cpu.r[2], 0x00FF), lshift(2, 8)) -- CH = block device locus
+	cpu:setbits(CF, false)
 end
 
 Dos.FN[0x50] = function(self: Dos, cpu: any, _machine: Host) -- set PSP
