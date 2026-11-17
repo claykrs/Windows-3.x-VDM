@@ -723,6 +723,20 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 tenth pass (2026-11-17): the Main group caption overlap was not an emulation bug.**
+The probe (media/win31/probe31.lua, git-ignored) synthesizes MAIN.GRP itself and
+placed items at y = 8 + row*56, x = 8 + column*72. Win 3.1 Program Manager draws the
+two-line caption (2 x 16px system font) under a 32px icon, so rows 56px apart collide
+exactly as seen; GetTextExtent/font/VGA planar paths are fine. With item spacing
+75 x 72 and a 270px tall Main window (Accessories opened too, via GROUP_LAYOUTS
+cmdShow=1) the 40M-step shot shows correct title bars, menu bar, icon bitmaps,
+two-line captions, scrollbars, group window frames and minimized Games icon; no
+fault, exit or wait through 40M steps (Program Manager idle). No repo code changed,
+so no regression test applies; the layout lives only in the local probe. Real
+3.1 setup would let Progman auto-arrange. Next frontier: needs input
+(menus, opening/running apps) which the headless probe has no driver for yet
+(`--scenario`/`--key-at` exist but were not exercised this pass).
+
 **R12 part 4 ninth pass (2026-11-16): Windows 3.1 standard mode boots to a drawn
 Program Manager (Main group, Accessories/Games icons, mouse cursor) at ~38M steps.**
 The "return to 1AAD" frontier was not a corrupted IP. The caller was `040F:1AA8`
