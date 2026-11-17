@@ -723,6 +723,42 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R12 part 4 eleventh pass (2026-11-17): interactive Program Manager works - menus, Run, Calculator,
+Notepad, Exit Windows to DOS, mouse clicks/double-clicks.**
+Driven entirely through the emulated machine's own input API (`machine:keyDown/keyUp`,
+`machine:setMouse/syncMouse`) by new local probe flags (media/win31/probe31.lua, git-ignored):
+`--script "alt+f r type:calc.exe enter w8000000 shot:name m:X,Y,B sync ctrl+f6 ..."` (tokens run
+from `--key-at`; `wN` waits N steps, `shot:NAME` writes media/win31/shots/NAME.rgba, convert with
+PIL `Image.frombytes('RGBA',(640,480),...)`), `--dos-after STEP` (INT 21 trace with file names),
+`--trace-mouseirq STEP`. Progman idles at ~40M steps; a run to a shot costs ~4-5 min.
+Verified: Alt+F File menu (New/Open/Run/Exit Windows), Run dialog, CALC.EXE (1+2 = 3, buttons
+clean), Alt+F4 closes it back to Progman, NOTEPAD (typed text, "save changes?" dialog, No),
+File>Exit Windows dialog, Enter -> Windows ends and WIN.COM returns to DOS (clean exit 0),
+mouse: `syncMouse` then absolute moves land exactly (200px jumps exact), double-click on the
+minimized Games icon restores the group, double-click on the Calculator icon launches it, button
+clicks work. Fixes (each with a regression test):
+- `f262930` dos: INT 21h AH=59 (get extended error) was an unsupported-function host abort when
+  Progman launched an app (KRNL286 calls it after a failed file op).
+- `cdfa90b` vga: write modes 0/2/3 now route the source through the ALU function select, and mode 3
+  always uses set/reset (enable ignored) as source per the VGA spec. The old code used the latch as
+  mode-3 source and skipped the function for set/reset planes, which drew coloured opaque boxes
+  behind glyphs (Calculator MC/MR/CE/Back/+- labels). Likely also the cause of the Tetris score
+  box artifacts noted in section 6 (not rechecked).
+- `d70bf5f` dos: AH=4C on a PSP created by AH=55 (KERNEL's per-task PSP) frees its arena blocks and
+  returns to the caller instead of jumping to PSP:000A (the parent's WIN.COM return address); any
+  app exit ended the whole Windows session with exit 0.
+- `2c3f81b` machine: shutdown-9 resume (`Machine.shutdownResume`) leaves a one-instruction
+  interrupt shadow after its STI. DOSX's resume code at 1861:0C13 begins with CLI and still holds
+  the other mode's SS:SP in its [24C0] slot; the mouse INT 74h callback landing on that instruction
+  re-entered DOSX, clobbered the slot and the later IRET went to 1436:0000 (#GP "CS selector 1427
+  is not a code segment") while clicking Calculator buttons.
+Open: after launching Calculator by mouse the Windows cursor drifted from the host position in one
+run (cursor ~0.8x of the requested displacement after several moves/clicks; not seen on a clean
+desktop). Not reproduced in isolation; suspect packets coalesced/dropped while the guest is busy
+or MOUSE.DRV acceleration. Next frontier: Solitaire/Games, Write/Paintbrush with the mouse
+(drag/paint), File Manager, MS-DOS Prompt (needs a PIF/DOS box in standard mode), Control Panel,
+exit-to-DOS screen contents (text mode), the cursor drift above.
+
 **R12 part 4 tenth pass (2026-11-17): the Main group caption overlap was not an emulation bug.**
 The probe (media/win31/probe31.lua, git-ignored) synthesizes MAIN.GRP itself and
 placed items at y = 8 + row*56, x = 8 + column*72. Win 3.1 Program Manager draws the
