@@ -723,6 +723,17 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**KNOWN LIMITATION (twelfth pass, time-boxed follow-up): MS-DOS Prompt does not start in standard mode.**
+Probe flag `--log-term 1` (local) logs every AH=4C / `dosTerminate`: in a whole `command.com` run there is exactly ONE
+AH=4C, WSWAP's own (`1133:0111`, curpsp 4336). The DOSX (PSP 1426) and Windows kernel (PSP 199C, 0x8664 paragraphs)
+never DOS-terminate: control returns to WIN.COM main (`1000:01BC`) by DOSX's real-mode exit without any INT 21h AH=4C/49,
+so their MCBs stay owned and WIN.COM's `EXEC dswap.exe / wswap.exe` fails (largest free 0x696 < 0x13EB) and loops printing
+"Missing/unable to load". Tried and reverted (no effect): freeing foreign-owned blocks in `Machine.dosTerminate`, and
+freeing them inside `Dos.FN[0x4B]` when the caller CS equals the root PSP (the guard never matched; `machine.pspSeg` or the
+stub-frame CS is not what the check assumed; log CS/pspSeg inside FN[0x4B] first). Next step: free owner 1426/199C blocks at the
+moment DOSX leaves for WIN.COM main (find that far transfer with `--tail-on-pc 1000:01BC`), then check whether WIN.COM execs
+COMMAND.COM. EXEC-return semantics for WSWAP children are already implemented and tested.
+
 **R12 part 4 twelfth pass addendum (goal 5, MS-DOS Prompt): EXEC children of WSWAP now return to the caller; the next blocker is memory.**
 `Dos.FN[0x4B]` (AL=0) saves the caller's CS:IP/SS:SP/registers (`execFrames[childPsp]`) when the program is
 `WSWAP.EXE` (or anything started while such a child runs) and `AH=4C` frees the child's blocks (AH=48 blocks it
