@@ -3,6 +3,7 @@
 -- The generated module is git-ignored (Microsoft binaries are not committed).
 
 const fs = require("@lune/fs")
+const process = require("@lune/process")
 const Install = require("./install")
 const Vfs = require("../core/Vfs")
 
@@ -53,8 +54,9 @@ end
 local winCom = fs.readFile(STAGED .. "/WIN.CNF")
 local kernel = fs.readFile(STAGED .. "/KERNEL.EXE")
 local winIni = fs.readFile(STAGED .. "/WIN.SRC")
--- Optional demo game: when the staged media has Tetris, boot straight into it.
-if fs.isFile(STAGED .. "/TETRIS.EXE") then
+-- Optional demo game: set WINBOOT_RUN_TETRIS=1 to boot straight into Tetris.
+-- By default Windows starts normally into Program Manager.
+if process.env.WINBOOT_RUN_TETRIS == "1" and fs.isFile(STAGED .. "/TETRIS.EXE") then
 	winIni = Install.setWinIniRunText(winIni, "C:\\WINDOWS\\TETRIS.EXE")
 end
 local systemIni = configureSystemIni(fs.readFile(STAGED .. "/SYSTEM.SRC"))
