@@ -51,6 +51,8 @@ export type Dos = {
 	handles: { [number]: Handle },
 	nextHandle: number,
 	cwd: string,
+	allocStrategy: number,
+	umbLink: number,
 	pendingLine: string?,
 	currentPsp: number?,
 	createdPsps: { [number]: number },
@@ -84,6 +86,8 @@ function Dos.new(machine: Host): Dos
 	}
 	self.nextHandle = 3
 	self.cwd = "C:\\"
+	self.allocStrategy = 0
+	self.umbLink = 0
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
 	self.currentPsp = nil
 	self.createdPsps = {}
@@ -1217,6 +1221,25 @@ Dos.FN[0x59] = function(_self: Dos, cpu: any, _machine: Host)
 	cpu.r[4] = bor(lshift(class, 8), action) -- BH:BL
 	cpu.r[2] = bor(band(cpu.r[2], 0x00FF), lshift(2, 8)) -- CH = block device locus
 	cpu:setbits(CF, false)
+end
+
+-- Get/set memory allocation strategy (AL=0/1) and UMB link state (AL=2/3).
+-- WINOLDAP saves and restores both around the DOS box it starts.
+Dos.FN[0x58] = function(self: Dos, cpu: any, _machine: Host)
+	const sub = al(cpu)
+	if sub == 0 then
+		setAX(cpu, self.allocStrategy)
+	elseif sub == 1 then
+		self.allocStrategy = band(cpu.r[4], 0xFFFF)
+	elseif sub == 2 then
+		setAX(cpu, self.umbLink)
+	elseif sub == 3 then
+		self.umbLink = band(cpu.r[4], 0xFF)
+	else
+		fail(cpu, 1)
+		return
+	end
+	ok(cpu)
 end
 
 Dos.FN[0x50] = function(self: Dos, cpu: any, _machine: Host) -- set PSP

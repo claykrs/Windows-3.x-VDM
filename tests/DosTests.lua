@@ -56,6 +56,28 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_58_allocation_strategy")
+		-- WINOLDAP (MS-DOS Prompt) saves/restores the allocation strategy;
+		-- AH=58 was an unsupported-function host error.
+		m.cpu.r[1] = 0x5800
+		Dos.FN[0x58](m.dos, m.cpu, m)
+		e(not m.cpu:getF(1) and m.cpu.r[1] == 0, "default first-fit")
+		m.cpu.r[1] = 0x5801
+		m.cpu.r[4] = 2
+		Dos.FN[0x58](m.dos, m.cpu, m)
+		m.cpu.r[1] = 0x5800
+		Dos.FN[0x58](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 2, "strategy round trips")
+		m.cpu.r[1] = 0x5803
+		m.cpu.r[4] = 1
+		Dos.FN[0x58](m.dos, m.cpu, m)
+		m.cpu.r[1] = 0x5802
+		Dos.FN[0x58](m.dos, m.cpu, m)
+		e(m.cpu.r[1] % 256 == 1, "umb link round trips")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_59_get_extended_error")
 		-- KRNL286 calls AH=59h after a failed file operation (Program Manager
 		-- Run of CALC.EXE); it was an unsupported-function host error.
