@@ -43,6 +43,25 @@ function MachineTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("int25_absolute_disk_read_fails_not_ready")
+		-- File Manager probes drive A: with INT 25h (through DOSX in standard
+		-- mode); the vector was zero so the guest jumped to 0000:0000.
+		local code = { 0xB0, 0x00, 0xCD, 0x25, 0x9C, 0x5B, 0x5A, 0xF4 } -- INT 25h; PUSHF; POP BX; POP DX; HLT
+		for index, byte in ipairs(code) do
+			m.mem:write8(0x6100 + index - 1, byte)
+		end
+		local cpu = m.cpu
+		cpu.cs, cpu.ds, cpu.es, cpu.ss = 0x600, 0x600, 0x600, 0x600
+		cpu.ip = 0x100
+		cpu.r[5] = 0xFFFE
+		m:run(50)
+		e(cpu.r[1] == 0x8002, ("AX=%04X"):format(cpu.r[1]))
+		e(bit32.band(cpu.r[4], 1) == 1, "CF set on return")
+		e(cpu.r[5] == 0xFFFE, "caller flags word popped, stack balanced")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_alloc_split_free")
 		local seg = m:dosAlloc(100)
 		e(seg == 0x0801, "first fit should hand out the low free block, got " .. tostring(seg))

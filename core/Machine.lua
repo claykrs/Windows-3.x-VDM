@@ -603,6 +603,28 @@ function Machine.new(deps: Deps, config: Config?): Machine
 		self.mem:write16(lshift(interrupt, 2) + 2, stubSeg)
 	end
 
+	-- Absolute disk read/write (INT 25h/26h). There is no block device behind
+	-- the DOS layer, so every request fails with "drive not ready". Real DOS
+	-- returns with RETF and leaves the caller's FLAGS word on the stack, and
+	-- DOSX reflects protected-mode INT 25h/26h through this vector (File
+	-- Manager probes drive A: with INT 25h and jumped to a zero vector).
+	const absDisk = {
+		{ interrupt = 0x25, hook = 0xA5, off = 0xD0 },
+		{ interrupt = 0x26, hook = 0xA6, off = 0xD4 },
+	}
+	for _, entry in absDisk do
+		self.cpu.defaultInts[entry.hook] = function()
+			self.cpu:wr(0, 0x8002) -- AH=80h (not ready/timeout), AL=02h (drive not ready)
+			self.cpu:setbits(1, true)
+		end
+		const base = lshift(stubSeg, 4) + entry.off
+		self.mem:write8(base, 0xCD) -- INT hook
+		self.mem:write8(base + 1, entry.hook)
+		self.mem:write8(base + 2, 0xCB) -- RETF (flags stay on the stack)
+		self.mem:write16(lshift(entry.interrupt, 2), entry.off)
+		self.mem:write16(lshift(entry.interrupt, 2) + 2, stubSeg)
+	end
+
 	-- EMM (INT 67h): report "not installed" and return
 	const emmOff = 0x50
 	const emmBase = lshift(stubSeg, 4) + emmOff
