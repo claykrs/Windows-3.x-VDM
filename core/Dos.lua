@@ -1080,6 +1080,33 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		fail(cpu, 8)
 		return
 	end
+	-- The DOSX / KRNL286 session this EXEC chain started has ended once the
+	-- caller (WIN.COM) is running again, but DOSX leaves for WIN.COM without a
+	-- DOS terminate, so its blocks were never released. DOS would have freed
+	-- them on AH=4C; a swapper / DOS box EXEC needs that memory.
+	local function reclaimSession(): boolean
+		if next(self.sessionPsps) == nil then
+			return false
+		end
+		const stale: { number } = {}
+		for _, block in machine.memBlocks do
+			if self.sessionPsps[block.owner] then
+				stale[#stale + 1] = block.start
+			end
+		end
+		for _, start in stale do
+			machine:dosFree(start)
+		end
+		self.sessionPsps = {}
+		return true
+	end
+	-- DSWAP runs after WSWAP has swapped Windows out and loads the DOS app
+	-- inside its own block: its header asks for maximum allocation (maxalloc
+	-- FFFF), so DOS hands it every free paragraph. Windows' memory is already
+	-- on the swap file at that point, so free it first. A small block made
+	-- DSWAP's own "app needs more than the block holds" check fail (error 3),
+	-- which WIN.COM reads as a failed DOS app.
+	const isDswap = string.find(string.upper(path), "DSWAP%.EXE$") ~= nil
 	local programParas: number
 	if isMZ then
 		const cblp = buffer.readu16(buf, 2)
@@ -1113,25 +1140,15 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		programParas = if boundNE
 			then math.max(minimumParas, machine:dosLargest())
 			else minimumParas
+		if isDswap and buffer.readu16(buf, 0x0C) == 0xFFFF then
+			reclaimSession()
+			programParas = math.max(minimumParas, machine:dosLargest())
+		end
 	else
 		programParas = math.max(0x100 + math.ceil(buffer.len(buf) / 16), 0x1000)
 	end
 	local pspSeg = machine:dosAlloc(programParas)
-	if not pspSeg and next(self.sessionPsps) ~= nil then
-		-- The DOSX / KRNL286 session this EXEC chain started has ended (the
-		-- caller is running again) but DOSX leaves for WIN.COM without a DOS
-		-- terminate, so its blocks were never released. Free them now so the
-		-- swapper / DOS box can load, as DOS would have on AH=4C.
-		const stale: { number } = {}
-		for _, block in machine.memBlocks do
-			if self.sessionPsps[block.owner] then
-				stale[#stale + 1] = block.start
-			end
-		end
-		for _, start in stale do
-			machine:dosFree(start)
-		end
-		self.sessionPsps = {}
+	if not pspSeg and reclaimSession() then
 		pspSeg = machine:dosAlloc(programParas)
 	end
 	if not pspSeg then

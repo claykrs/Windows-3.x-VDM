@@ -159,6 +159,60 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_exec_dswap_takes_all_free_memory_after_reclaiming_the_session")
+		-- DSWAP's header asks for maximum allocation and its own check fails
+		-- with error 3 when the DOS app does not fit in its block, so EXEC must
+		-- free the ended DOSX/KRNL286 session and give DSWAP everything left.
+		local header = string.pack(
+			"<c2I2I2I2I2I2I2I2I2I2I2I2I2I2",
+			"MZ",
+			5,
+			1,
+			0,
+			2,
+			0,
+			0xFFFF,
+			0,
+			0x100,
+			0,
+			0,
+			0,
+			0,
+			0
+		)
+		local image = string.char(0xB8, 0x00, 0x4C, 0xCD, 0x21)
+		m.vfs:writeFile("C:DSWAP.EXE", header .. string.rep(string.char(0), 512 - #header) .. image)
+		local hogSize = m:dosLargest()
+		local hog = m:dosAlloc(hogSize)
+		m:dosSetOwner(hog, 0x4444)
+		m.dos.sessionPsps[0x4444] = true
+		local cpu = m.cpu
+		local name = "C:DSWAP.EXE"
+		for index = 1, #name do
+			m.mem:write8(cpu.ds * 16 + 0x10 + index - 1, string.byte(name, index))
+		end
+		m.mem:write8(cpu.ds * 16 + 0x10 + #name, 0)
+		for index = 0, 13 do
+			m.mem:write8(cpu.es * 16 + 0x40 + index, 0)
+		end
+		cpu.es = cpu.ds
+		cpu.r[3] = 0x10
+		cpu.r[4] = 0x40
+		cpu.r[1] = 0x4B00
+		Dos.FN[0x4B](m.dos, cpu, m)
+		e(not cpu:getF(1), "EXEC succeeds")
+		local gotAll = false
+		for _, block in m.memBlocks do
+			if block.owner ~= 0 and block.owner ~= 0x4444 and block.size >= hogSize then
+				gotAll = true
+			end
+		end
+		e(gotAll, "DSWAP's block holds the whole reclaimed region")
+		e(next(m.dos.sessionPsps) == nil, "session list cleared")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_58_allocation_strategy")
 		-- WINOLDAP (MS-DOS Prompt) saves/restores the allocation strategy;
 		-- AH=58 was an unsupported-function host error.
