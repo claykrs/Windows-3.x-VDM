@@ -992,11 +992,13 @@ Dos.FN[0x4A] = function(_self: Dos, cpu: any, machine: Host) -- resize block (ES
 						-- arena top
 						next.size = spare
 					else
-						-- the remainder is only the neighbour's MCB paragraph
-						-- (or nothing): DOS hands the whole region over
-						if spare == 0 then
-							block.size = newSize + 1
-						end
+						-- the request takes the whole neighbour including its
+						-- MCB paragraph (spare is 0 or -1): DOS hands the whole
+						-- region over. Leaving block.size alone for spare == -1
+						-- dropped the neighbour's paragraphs from the arena, so
+						-- DSWAP's grow back to its full size lost ~140 KB and
+						-- WSWAP could no longer load for the swap-in.
+						block.size = block.size + 1 + next.size
 						table.remove(machine.memBlocks, index + 1)
 					end
 					machine:syncArena()
@@ -1037,6 +1039,7 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		cpu.dosxResident
 		or self.kernelPsp ~= nil
 		or string.find(string.upper(path), "WSWAP%.EXE$")
+		or string.find(string.upper(path), "DSWAP%.EXE$")
 		or next(self.execFrames) ~= nil
 	then
 		callerFrame = {

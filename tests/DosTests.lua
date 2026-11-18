@@ -213,6 +213,34 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_4a_grow_over_the_whole_free_neighbour_keeps_its_paragraphs")
+		-- DSWAP shrinks its block, runs the DOS app, then grows back to its
+		-- original size, which is exactly the block plus its free neighbour.
+		-- The neighbour used to vanish while the size stayed small.
+		local seg = m:dosAlloc(0x20)
+		local cpu = m.cpu
+		cpu.es = seg
+		cpu.r[4] = 0x10
+		Dos.FN[0x4A](m.dos, cpu, m)
+		local block, free
+		for index, b in m.memBlocks do
+			if b.start == seg then
+				block, free = b, m.memBlocks[index + 1]
+			end
+		end
+		local total = block.size + 1 + free.size
+		cpu.es = seg
+		cpu.r[4] = total
+		Dos.FN[0x4A](m.dos, cpu, m)
+		e(not cpu:getF(1), "grow succeeds")
+		e(
+			block.size == total,
+			"block now spans the whole region (" .. block.size .. " vs " .. total .. ")"
+		)
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_58_allocation_strategy")
 		-- WINOLDAP (MS-DOS Prompt) saves/restores the allocation strategy;
 		-- AH=58 was an unsupported-function host error.
