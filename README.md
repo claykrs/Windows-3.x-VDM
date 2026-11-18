@@ -31,8 +31,12 @@ executing on the emulated CPU. The public repository is
   Studio boot.
 - PC speaker: the 8254 channel-2 divisor (ports 0x43/0x42) and the port 0x61
   gate are modelled; the host replays an optional short beep on state changes.
+- MS-DOS Prompt runs: the Main group item launches `WINOLDAP`, the grabber and
+  a stand-in `COMMAND.COM` as a full-screen text session; `exit` returns to
+  Program Manager. The host maps hardware scan codes to the DOS key buffer
+  while the DOS child runs.
 - The gate `lune run tools/check.lua` passes: stylua, selene (luau + roblox),
-  `luau-analyze --mode=strict`, and 924 test assertions.
+  `luau-analyze --mode=strict`, and 1015 test assertions.
 
 ![MS-DOS Executive listing the real c:\windows directory](docs/screenshots/r6-msdos-executive.png)
 
@@ -97,7 +101,8 @@ are diagnostic only.
 ### Studio
 
 Build the model (or take `Vdm.rbxmx` from the
-[releases page](https://github.com/claykrs/Windows-3.x-VDM/releases)):
+[releases page](https://github.com/claykrs/Windows-3.x-VDM/releases); release
+models contain only the emulator source, no Microsoft files):
 
 ```powershell
 tools\bin\lune.exe run tools/build_rbxmx.lua   # writes Vdm.rbxmx
@@ -116,11 +121,9 @@ tools\bin\lune.exe run tools/build_rbxmx.lua   # writes Vdm.rbxmx
 
 ## Media pipeline and licensing
 
-The Microsoft binaries are not in the repository. Either unzip
-`win30a-media.zip` from the [releases page](https://github.com/claykrs/Windows-3.x-VDM/releases)
-into `media/win30/`, or place your own Windows 3.0a 5.25-inch 1.2 MB `.IMG`
-set (e.g. the WinWorld images) in `media/win30/Microsoft Windows 3.0a (5.25 1.2MB)/`.
-Then:
+The Microsoft binaries are not in the repository and are not distributed with
+releases. Supply your own Windows 3.0a 5.25-inch 1.2 MB `.IMG` set in
+`media/win30/Microsoft Windows 3.0a (5.25 1.2MB)/`. Then:
 
 ```powershell
 tools\bin\lune.exe run tools/extract.lua        # FAT12 floppies -> media/win30/files/
@@ -144,7 +147,7 @@ property of Microsoft; supply your own copy to run it.
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)): a stylua format
 check, selene lint over core/tools/tests plus a Roblox-config pass,
 `luau-analyze --mode=strict` over `core/`, and the test suite — currently
-924 assertions.
+1015 assertions.
 
 ```powershell
 tools\bin\lune.exe run tools/check.lua
