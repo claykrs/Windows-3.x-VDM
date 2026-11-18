@@ -133,6 +133,7 @@ export type Machine = {
 	keyboardOutputFull: boolean,
 	keyboardPending: boolean,
 	keyboardEnabled: boolean,
+	shiftHeld: boolean,
 	keyboardIrqActive: boolean,
 	keyboardIrqSs: number,
 	keyboardIrqSp: number,
@@ -156,6 +157,7 @@ export type Machine = {
 	outputText: (self: Machine) -> string,
 	screenText: (self: Machine) -> string,
 	pushKeys: (self: Machine, keys: string) -> (),
+	bridgeDosKey: (self: Machine, scan: number) -> (),
 	maybeResume: (self: Machine) -> (),
 	setMouse: (self: Machine, x: number, y: number, buttons: number) -> (),
 	keyDown: (self: Machine, scan: number) -> (),
@@ -288,6 +290,7 @@ function Machine.new(deps: Deps, config: Config?): Machine
 	self.keyboardOutputFull = false
 	self.keyboardPending = false
 	self.keyboardEnabled = true
+	self.shiftHeld = false
 	self.keyboardIrqActive = false
 	self.keyboardIrqSs = 0
 	self.keyboardIrqSp = 0
@@ -1068,7 +1071,48 @@ end
 -- 8042-style scan-code queue. The guest's INT 9 handler reads the latched byte
 -- from port 0x60; a chained BIOS handler reads the same byte again. Queue a
 -- make code on key down and the same code with bit 7 set on key up.
+-- US layout: set-1 make code -> { plain, shifted } ASCII. The host DOS layer and
+-- INT 16h read ASCII from machine.keys, but Windows (and the Studio client)
+-- only deliver scan codes, so a running DOS program (the MS-DOS Prompt) needs
+-- them translated.
+local SCAN_ASCII: { [number]: { number } } = {}
+do
+	local function row(first: number, plain: string, shifted: string)
+		for index = 1, #plain do
+			SCAN_ASCII[first + index - 1] =
+				{ string.byte(plain, index), string.byte(shifted, index) }
+		end
+	end
+	row(0x02, "1234567890-=", "!@#$%^&*()_+")
+	row(0x10, "qwertyuiop[]", "QWERTYUIOP{}")
+	row(0x1E, "asdfghjkl;'`", 'ASDFGHJKL:"~')
+	row(0x2B, "\\zxcvbnm,./", "|ZXCVBNM<>?")
+	SCAN_ASCII[0x01] = { 27, 27 }
+	SCAN_ASCII[0x0E] = { 8, 8 }
+	SCAN_ASCII[0x0F] = { 9, 9 }
+	SCAN_ASCII[0x1C] = { 13, 13 }
+	SCAN_ASCII[0x39] = { 32, 32 }
+end
+
+-- feed a make code to the DOS keyboard buffer while a DOS program (an EXEC
+-- child of the Windows kernel) owns the console
+function Machine.bridgeDosKey(self: Machine, scan: number)
+	if scan == 0x2A or scan == 0x36 then
+		self.shiftHeld = true
+	elseif scan == 0xAA or scan == 0xB6 then
+		self.shiftHeld = false
+	end
+	if scan >= 0x80 or next(self.dos.execFrames) == nil then
+		return
+	end
+	const mapped = SCAN_ASCII[scan]
+	if mapped then
+		self:pushKeys(string.char(if self.shiftHeld then mapped[2] else mapped[1]))
+	end
+end
+
 function Machine.queueScanCode(self: Machine, scan: number)
+	self:bridgeDosKey(scan)
 	if not self.keyboardEnabled then
 		return
 	end

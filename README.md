@@ -159,13 +159,15 @@ Application compatibility is verified with the harness and documented in
   loading yet.
 - **No EMS, and no XMS on the 3.0a path.** INT 67h reports EMM as not
   installed; XMS exists in the core but is only enabled on the 286 track.
-- **No DOS `COMMAND.COM`.** It is a DOS file, not part of the Windows media,
-  so the Main group's DOS Prompt item reports "Cannot find file" by design.
+- **Stand-in `COMMAND.COM`.** Microsoft's is not part of the Windows media, so
+  the Main group's DOS Prompt item runs a 254-byte stand-in
+  (`fixtures/Command.lua`): banner, `C:\>` prompt, `exit` returns to Windows,
+  anything else answers "Bad command or file name". It is not a real shell.
 - **Instruction-counted timer.** IRQ0 fires every `config.timerInterval`
   instructions, not on wall-clock PIT timing.
-- **Cosmetics.** Some icon planes show colour artifacts, Program Manager packs
-  group labels too tightly at 640×480, and Tetris' score/level/lines digits
-  draw beside their opaque value backgrounds. Gameplay is unaffected.
+- **Cosmetics.** Some icon planes show colour artifacts and Tetris'
+  score/level/lines digits draw beside their opaque value backgrounds.
+  Gameplay is unaffected.
 - **Missing subsystems.** No printer (LPT/INT 17h/spooler), serial (8250/INT
   14h) or OLE/clipboard backends; installers run from the staged VFS only.
 

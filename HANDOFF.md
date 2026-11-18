@@ -723,6 +723,25 @@ that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
 paths), and make AH=4C of the root process stop the machine instead of
 re-entering.
 
+**R13 (2026-11-17): MS-DOS Prompt works in the shipped real-mode 3.0a build; Control Panel Color verified; group captions fixed.**
+- The twelfth-pass MS-DOS Prompt limitation below is about the Win 3.1 *standard-mode* probe tree (WSWAP/DSWAP swapping) and is
+  still open there. The shipped build is Windows 3.0a real mode, where "DOS Prompt" is `command.com` run by KERNEL/WINOLDAP
+  through a plain INT 21h AH=4B, and it needed only four things:
+  - a COMMAND.COM: `fixtures/Command.lua` is a hand-assembled 254-byte stand-in (banner, `C:\>`, `exit` any case, otherwise
+    "Bad command or file name"), written to `C:\WINDOWS\COMMAND.COM` by `Install.seed` and by `Emulator.client.lua`;
+  - `Dos.kernelPsp`: once `KERNEL.EXE` has been EXECed every later EXEC gets a caller frame, so the child's AH=4C returns to
+    WINOLDAP instead of ending the machine (guest then restores 640x480 graphics by itself);
+  - `Machine.bridgeDosKey`: scan codes (all that Windows / the Studio client deliver) are also translated to ASCII into
+    `machine.keys` while an EXEC child owns the console, because the DOS layer and INT 16h read ASCII;
+  - the 286 grabber `VGACOLOR.GR2` in the Studio fixtures (`pack_winboot.lua`), else "Cannot find the grabber".
+  Verified in Studio: Enter on the DOS Prompt icon shows the text session, typed `dir` answers "Bad command", `exit` returns
+  to Program Manager. Tests: `standin_command_com_prompts_and_exits`,
+  `scan_codes_reach_dos_keyboard_buffer_only_while_a_dos_child_runs`. `tools/probe_dosbox.lua` is the fast repro (5M steps).
+- Control Panel Color: the combo is fine in the shipped build ("Windows Default"; staged CONTROL.INI carries `[color schemes]`).
+  The empty combo seen earlier came from the 3.1 probe tree, which has no CONTROL.INI.
+- Program Manager captions: our generated group files used an 80px item pitch; now 110px (`ITEM_STEP_X`), windows widened, and
+  WIN.INI gets `[Desktop] IconSpacing=110` (`Install.setIniKeyText`), so "Control Panel"/"Print Manager"/"Windows Setup" are whole.
+
 **R12 part 4 twelfth pass, final state of the MS-DOS Prompt work (standard mode) and the other follow-ups.**
 Findings (probe flags `--log-exec`, `--log-term`, `--ring-first-pc SEG:OFF` are local): WIN.COM (PSP 1000) EXECs
 WSWAP.EXE (PSP 10F0), which EXECs DOSX.EXE (1426), which EXECs KRNL286.EXE (199C): the whole Windows session runs inside nested

@@ -54,6 +54,7 @@ export type Dos = {
 	allocStrategy: number,
 	execFrames: { [number]: any },
 	sessionPsps: { [number]: boolean },
+	kernelPsp: number?,
 	umbLink: number,
 	pendingLine: string?,
 	currentPsp: number?,
@@ -91,6 +92,7 @@ function Dos.new(machine: Host): Dos
 	self.allocStrategy = 0
 	self.execFrames = {}
 	self.sessionPsps = {}
+	self.kernelPsp = nil
 	self.umbLink = 0
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
 	self.currentPsp = nil
@@ -1031,6 +1033,7 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	local callerFrame: any = nil
 	if
 		cpu.dosxResident
+		or self.kernelPsp ~= nil
 		or string.find(string.upper(path), "WSWAP%.EXE$")
 		or next(self.execFrames) ~= nil
 	then
@@ -1152,6 +1155,12 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		or string.find(string.upper(path), "KRNL286%.EXE$")
 	then
 		self.sessionPsps[pspSeg] = true
+	end
+	if string.find(string.upper(path), "KERNEL%.EXE$") and self.kernelPsp == nil then
+		-- the real-mode Windows kernel is running from here on: every later
+		-- EXEC (the MS-DOS Prompt's COMMAND.COM via WINOLDAP) is a normal DOS
+		-- child that must return to its caller when it ends
+		self.kernelPsp = pspSeg
 	end
 
 	if isMZ then

@@ -1314,6 +1314,28 @@ function MachineTests.run(mkMachine, expect)
 		end
 		e(buffer.readu32(m.vga.rgba, 0) == sentinel, "linear region touched outside pixels")
 	end
+	do
+		local m = mkMachine()
+		local e = expect("scan_codes_reach_dos_keyboard_buffer_only_while_a_dos_child_runs")
+		-- Windows and the Studio client deliver set-1 scan codes. While an EXEC
+		-- child (the MS-DOS Prompt) owns the console they must also arrive as
+		-- ASCII in the DOS/INT 16h buffer; otherwise Windows keeps them.
+		m:keyDown(0x12)
+		e(#m.keys == 0, "no DOS child: scan code stays with the guest driver")
+		m.dos.execFrames[0x1234] = {}
+		m:keyDown(0x12) -- e
+		m:keyDown(0x2D) -- x
+		m:keyUp(0x12)
+		m:keyDown(0x2A) -- shift
+		m:keyDown(0x02) -- 1 -> !
+		m:keyUp(0x2A)
+		m:keyDown(0x2B) -- backslash
+		m:keyDown(0x1C) -- enter
+		e(
+			table.concat(m.keys, ",") == "101,120,33,92,13",
+			"buffer holds e, x, !, backslash, CR and no break codes"
+		)
+	end
 end
 
 return MachineTests

@@ -344,6 +344,7 @@ if BOOT_WINDOWS then
 	machine.vfs:ensureDir("C:\\WINDOWS\\SYSTEM")
 	machine.vfs:writeFile("C:\\WINDOWS\\WIN.COM", WinBoot.winCom)
 	machine.vfs:writeFile("C:\\WINDOWS\\KERNEL.EXE", WinBoot.kernel)
+	machine.vfs:writeFile("C:\\WINDOWS\\COMMAND.COM", require(Fixtures:WaitForChild("Command")))
 	machine.vfs:writeFile("C:\\WINDOWS\\WIN.INI", WinBoot.winIni)
 	machine.vfs:writeFile("C:\\WINDOWS\\SYSTEM.INI", WinBoot.systemIni)
 	for name, encoded in DriversA do

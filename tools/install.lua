@@ -9,6 +9,7 @@
 -- reports exactly which SETUP.INF files that leaves behind.
 local fs = require("@lune/fs")
 local Group = require("./win_group")
+local Command = require("../fixtures/Command")
 
 local Install = {}
 
@@ -546,6 +547,9 @@ function Install.seed(machine)
 		groupFiles = groupFiles,
 		groupFallbacks = groupFallbacks,
 	}
+	-- Microsoft's COMMAND.COM is not shipped; the MS-DOS Prompt icon runs this
+	-- stand-in so Windows finds COMSPEC and returns to the desktop on EXIT.
+	put("C:\\WINDOWS\\COMMAND.COM", Command)
 	Install.writeWinIni(machine)
 	return count
 end

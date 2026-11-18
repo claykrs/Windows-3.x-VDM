@@ -159,6 +159,8 @@ emitFiles("fixtures/WinBootDriversB.lua", {
 	"VGASYS.FON",
 	"VGAFIX.FON",
 	"VGAOEM.FON",
+	-- the 286 grabber WINOLDAP loads to run a DOS program (MS-DOS Prompt)
+	"VGACOLOR.GR2",
 })
 -- The shell itself: without PROGMAN.EXE the real KERNEL exits after loading
 -- USER. WIN87EM/LZEXPAND are already in DriversA.

@@ -455,6 +455,30 @@ function DosTests.run(mkMachine, expect)
 		Dos.FN[0x38](m.dos, m.cpu, m)
 		e(m.cpu.r[4] == 44 and m.cpu.r[1] == 44, "country did not persist")
 	end
+
+	do
+		local m = mkMachine()
+		local e = expect("standin_command_com_prompts_and_exits")
+		-- the MS-DOS Prompt icon runs this shipped stand-in: banner, C:\> prompt,
+		-- "Bad command" for unknown lines, and EXIT (any case) returns to Windows
+		m:loadCOM(buffer.fromstring(require("../fixtures/Command")))
+		local function type_(text: string)
+			m:pushKeys(text .. string.char(13))
+		end
+		m:run(20000)
+		e(string.find(m:outputText(), "C:\\>", 1, true) ~= nil, "prompt shown")
+		e(m.exitCode == nil, "still waiting for a line")
+		type_("dir")
+		m:run(20000)
+		e(
+			string.find(m:outputText(), "Bad command or file name", 1, true) ~= nil,
+			"unknown line rejected"
+		)
+		e(m.exitCode == nil, "unknown command keeps the prompt")
+		type_("EXIT")
+		m:run(20000)
+		e(m.exitCode == 0, "EXIT ends the shell with code 0")
+	end
 end
 
 return DosTests
