@@ -181,6 +181,38 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_4408_floppies_removable_c_fixed")
+		-- AX=0 means removable, 1 fixed. It was inverted, so WIN.COM's
+		-- WSWAP chose A: as the swap drive and DSWAP failed with error 3.
+		for drive, want in { [1] = 0, [2] = 0, [3] = 1 } do
+			m.cpu.r[1] = 0x4408
+			m.cpu.r[4] = drive
+			Dos.FN[0x44](m.dos, m.cpu, m)
+			e(not m.cpu:getF(1) and m.cpu.r[1] == want, "drive " .. drive)
+		end
+	end
+
+	do
+		local m = mkMachine()
+		local e = expect("dos_36_floppy_drives_report_invalid")
+		-- WSWAP/DSWAP choose the swap drive by free space; A: and B: have no
+		-- media and must answer AX=FFFFh so the swap file lands on C:.
+		m.cpu.r[1] = 0x3600
+		m.cpu.r[3] = 1
+		Dos.FN[0x36](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 0xFFFF, "A: invalid")
+		m.cpu.r[1] = 0x3600
+		m.cpu.r[3] = 2
+		Dos.FN[0x36](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 0xFFFF, "B: invalid")
+		m.cpu.r[1] = 0x3600
+		m.cpu.r[3] = 3
+		Dos.FN[0x36](m.dos, m.cpu, m)
+		e(m.cpu.r[1] == 4 and m.cpu.r[4] ~= 0, "C: reports space")
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_59_get_extended_error")
 		-- KRNL286 calls AH=59h after a failed file operation (Program Manager
 		-- Run of CALC.EXE); it was an unsupported-function host error.

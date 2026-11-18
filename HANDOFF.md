@@ -742,6 +742,25 @@ re-entering.
 - Program Manager captions: our generated group files used an 80px item pitch; now 110px (`ITEM_STEP_X`), windows widened, and
   WIN.INI gets `[Desktop] IconSpacing=110` (`Install.setIniKeyText`), so "Control Panel"/"Print Manager"/"Windows Setup" are whole.
 
+**R14 (2026-11-17): Win 3.1 standard-mode swap path decoded further; swap drive was A: (inverted IOCTL), DSWAP still ends with error 3.**
+Status note: the premise "standard mode never reaches a desktop" is stale - the ninth pass reaches Program Manager (~38M steps)
+and the probe still loads PROGMAN/USER/drivers by 41-42.6M. The open work is only the MS-DOS Prompt swap path. REA was not
+usable (Ghidra unconfigured, and the Windows Ghidra provider rejects DOS MZ), so WSWAP/DSWAP/WIN.COM were disassembled with
+capstone and traced with new local probe flags (`--log-2fall STEP` all INT 2Fh with ES:DI bytes; `--dos-after` now dumps the
+WIN.COM interface block at 1000:06C8+16C on AH=4C/4D and the swap-path strings on AH=36).
+- Fixed (tests `dos_4408_floppies_removable_c_fixed`, `dos_36_floppy_drives_report_invalid`): INT 21h AH=44 AL=08 returned
+  fixed for A:/B: and removable for C: (inverted), so WSWAP picked A: as the swap drive (`A:\WINDOWS\~WOA*`, `A:\~WOA100F.TMP`);
+  AH=36 now answers AX=FFFF for A:/B:. Swap file now `C:\~WOA100F.TMP`. The old MachineTests check encoded the inversion.
+- Proven flow at ~42.52M: kernel issues INT 2F AX=4B80 (sets WIN.COM event byte cs:[18C]) and 4B01 chain builds; WSWAP#1
+  (psp 100F) reads program name "COMMAND" from 1000:0B2B, writes the swap file (~56 KB of blocks, headers 0x10/0x8 byte
+  descriptors), AH=4C AL=0, status word [06C8+171]=0000. WIN.COM then EXECs DSWAP ('d' chosen because task flag 0x2000 is
+  clear), DSWAP does only attrib+delete of `~WOA100D.TMP`, ends AH=4C AL=0 but leaves **[06C8+171]=0x0300 (error AH=3)**, so
+  WIN.COM treats the DOS app as failed, EXECs WSWAP#2 (swap in) and restarts Windows -> GPF at KRNL286 0001:713E.
+- Not the cause (disproved): path-not-found on `A:\WINDOWS` (path now exists, error 3 persists). WSWAP/DSWAP are one state
+  machine (`lcall [0x1a2]` handler at [0x61]=0x7b4/overlay), DSWAP error byte is `[0x24]`. Next: trace DSWAP from entry (12DA) to
+  find which state returns AH=3 (candidate: the [06C8+16D]=0x100F owner/psp check at DSWAP 0xD09 vs its own psp 0x100D, or an
+  INT 2F 4A05 SI=3/5 reply our core leaves as AX unchanged), then make that answer match WIN.COM's 4A05/4B hook.
+
 **R12 part 4 twelfth pass, final state of the MS-DOS Prompt work (standard mode) and the other follow-ups.**
 Findings (probe flags `--log-exec`, `--log-term`, `--ring-first-pc SEG:OFF` are local): WIN.COM (PSP 1000) EXECs
 WSWAP.EXE (PSP 10F0), which EXECs DOSX.EXE (1426), which EXECs KRNL286.EXE (199C): the whole Windows session runs inside nested

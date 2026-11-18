@@ -940,7 +940,8 @@ function MachineTests.run(mkMachine, expect)
 		m.cpu.r[1] = 0x4406 -- input status
 		Dos.FN[0x44](m.dos, m.cpu, m)
 		e(m.cpu:rb(0) == 0, "input status should be empty")
-		m.cpu.r[1] = 0x4408 -- fixed disk
+		m.cpu.r[1] = 0x4408 -- C: is the fixed disk (AX=1)
+		m.cpu.r[4] = 3
 		Dos.FN[0x44](m.dos, m.cpu, m)
 		e(m.cpu.r[1] == 1, "removable query")
 	end

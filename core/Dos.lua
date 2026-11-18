@@ -879,7 +879,9 @@ Dos.FN[0x44] = function(self: Dos, cpu: any, machine: Host)
 			fail(cpu, 0x0F)
 			return
 		end
-		setAX(cpu, drive <= 2 and 1 or 0)
+		-- DOS: AX=0 removable, AX=1 fixed. This was inverted (A:/B: fixed, C:
+		-- removable), so WIN.COM/WSWAP picked A: as the fixed swap drive.
+		setAX(cpu, drive <= 2 and 0 or 1)
 		ok(cpu)
 	elseif sub == 9 then -- is drive remote -> this machine has only local drives
 		local drive = band(cpu.r[4], 0xFF)
@@ -1551,6 +1553,14 @@ Dos.FN[0x36] = function(self: Dos, cpu: any, _machine: Host) -- get free disk sp
 	end
 	if drive < 1 or drive > 3 then
 		fail(cpu, 0x0F)
+		return
+	end
+	-- The machine has one fixed disk (C:). A: and B: have no media: real DOS
+	-- answers AX=FFFFh (invalid drive). WSWAP/DSWAP pick the swap drive by free
+	-- space, so reporting identical space for A: made them swap to A:\ and
+	-- DSWAP then died with "path not found" (error 3) on A:\WINDOWS.
+	if drive < 3 then
+		setAX(cpu, 0xFFFF)
 		return
 	end
 	setAX(cpu, 4) -- sectors per cluster
