@@ -189,10 +189,13 @@ being finished. Where it stands:
   old 168k wall and runs **4M steps fault-free**: DOSX EXEC'd, KRNL286
   EXEC'd, and KRNL286's protected-mode phase running with WIN.COM's second
   stage alive.
-- **Being finished now:** KRNL286's PM phase polls WIN.COM's RM callback
-  work bits (`cs:[0x18C] & 0x3F` in WIN.COM's block) that nothing sets
-  yet — the current frontier is WIN.COM's INT 21h handler post-processing
-  (`25ec92e` in HANDOFF.md has the full evidence chain).
+- **Now:** the boot reaches a drawn Program Manager in standard mode
+  (about 38M steps) and the apps load. MS-DOS Prompt launches through
+  WSWAP/DSWAP, shows the stand-in `C:\>` prompt and returns on `exit`
+  (fixes: DSWAP's memory check, `INT 21h AH=4A` grow, drive types for the
+  swap file). **Open:** Windows faults when it resumes after the swap-in
+  because the kernel block DSWAP now owns is not part of the swap file;
+  options and evidence are in HANDOFF.md (R15).
 
 Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
 [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
@@ -207,7 +210,7 @@ targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
 - **Windows 3.0a real mode:** EMS, demand segment loading, printer/serial
   backends and the remaining cosmetic fixes.
 - **Windows 3.1 standard mode (286 protected mode):** in-progress R&D on the
-  DOSX/KRNL286 bring-up. It does not boot yet; see
+  DOSX/KRNL286 bring-up. It boots to Program Manager; MS-DOS Prompt resume is open; see
   [docs/R7-PLAN.md](docs/R7-PLAN.md) and
   [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
   targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
