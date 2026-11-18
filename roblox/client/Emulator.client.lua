@@ -420,12 +420,7 @@ const NO_REPEAT: { [number]: boolean } = {
 	[0x46] = true,
 }
 
-local pointerOverWindow = false
 local guestPointerAvailable = false
-local pointerCapture = false
-local captureArmed = true
-local captureStartedAt = 0
-local pointerOverSince = 0
 local mouseButtons = 0
 local mouseSynced = false
 local lastPointer = Vector2.zero
@@ -441,54 +436,25 @@ local function hasGuestPointer(): boolean
 	return machine.mousePs2Enabled and machine.mouseDeviceHandler ~= nil
 end
 
+local pointerInsideVideo = false
+
 local function refreshPointerVisibility()
-	-- Hide the host arrow while the pointer is anywhere over the host window
-	-- (video, title or status bar): Windows draws its own cursor in the video
-	-- area, and Studio still paints the OS arrow over the viewport. Keeping the
-	-- host arrow hidden for the whole window leaves exactly one cursor.
+	-- The real pointer stays free: the guest cursor follows its absolute
+	-- position (see updateMouse). An earlier Studio mode locked the host
+	-- pointer and integrated GetMouseDelta into a virtual one, which drifted
+	-- off the video, released the lock mid-gesture and made the guest feel
+	-- slow. Hide the host arrow only while it is over the video, where Windows
+	-- draws its own cursor; the title and status bars keep the normal arrow.
 	guestPointerAvailable = hasGuestPointer()
-	const shouldCapture = RunService:IsStudio()
-		and pointerOverWindow
-		and guestPointerAvailable
-		and captureArmed
-		and os.clock() - pointerOverSince >= 0.2
-	if shouldCapture and not pointerCapture then
-		-- Seed the virtual pointer before the host cursor is locked. lastPointer
-		-- is the real absolute sample from this frame, so the guest does not
-		-- jump to the lock point.
-		captureStartedAt = os.clock()
-	end
-	if not shouldCapture then
-		-- Moving the virtual pointer out of the window releases the host cursor
-		-- so Studio remains usable; it re-arms after the real pointer leaves.
-		if pointerCapture and not pointerOverWindow then
-			captureArmed = false
-		end
-		pointerCapture = false
-	end
-	pointerCapture = shouldCapture
-	const hide = pointerOverWindow and guestPointerAvailable and pointerCapture
+	const hide = pointerInsideVideo and guestPointerAvailable
 	UserInputService.MouseIconEnabled = not hide
-	if RunService:IsStudio() then
-		const behavior = pointerCapture and Enum.MouseBehavior.LockCurrentPosition
-			or Enum.MouseBehavior.Default
-		if UserInputService.MouseBehavior ~= behavior then
-			UserInputService.MouseBehavior = behavior
-		end
+	if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	end
 end
 
-local function setPointerState(overWindow: boolean)
-	if overWindow and not pointerOverWindow then
-		pointerOverSince = os.clock()
-	end
-	pointerOverWindow = overWindow
-	if not pointerCapture and not overWindow then
-		-- The real pointer left the host window: allow a fresh capture on entry.
-		captureArmed = true
-	end
-	-- Called every frame: the 0.2s settle delay and the virtual-pointer exit
-	-- both need to be re-evaluated even when the boolean state is unchanged.
+local function setPointerState(overWindow: boolean, insideVideo: boolean?)
+	pointerInsideVideo = overWindow and insideVideo == true
 	refreshPointerVisibility()
 end
 
@@ -540,11 +506,7 @@ local function updateMouse(position: Vector2?)
 		-- InputObject.Position is a Vector3; lastPointer stays a Vector2 in
 		-- GUI space, and the Heartbeat poll adds Vector2 deltas to it.
 		const guiPos = Vector2.new(position.X, position.Y)
-		-- While captured the real pointer is locked; InputChanged still reports
-		-- the frozen position. Use the virtual pointer driven by GetMouseDelta.
-		if not pointerCapture then
-			lastPointer = guiPos
-		end
+		lastPointer = guiPos
 	end
 	const size = vgaSink.root.AbsoluteSize
 	const at = vgaSink.root.AbsolutePosition
@@ -580,7 +542,7 @@ local function updateMouse(position: Vector2?)
 	const fx = (pos.X - at.X) / size.X
 	const fy = (pos.Y - at.Y) / size.Y
 	const inside = fx >= 0 and fx <= 1 and fy >= 0 and fy <= 1
-	setPointerState(overWindow)
+	setPointerState(overWindow, inside)
 	if not inside then
 		if window.Gui then
 			window.Gui:SetAttribute("VdmPointerInside", false)
@@ -767,25 +729,13 @@ cleaner:Connect(RunService.Heartbeat, function()
 	-- sample. The host window can move or clamp under a stationary pointer, and
 	-- a cached rect must never make a visually-inside pointer look outside (or
 	-- leave the OS cursor visible over the guest).
-	if pointerCapture then
-		if os.clock() - captureStartedAt >= 0.05 then
-			const delta = UserInputService:GetMouseDelta()
-			if delta.X ~= 0 or delta.Y ~= 0 then
-				-- GetMouseDelta returns Vector3 on this client; lastPointer is
-				-- a Vector2 in GUI space.
-				lastPointer += Vector2.new(delta.X, delta.Y)
-			end
-		end
-		updateMouse(nil)
+	const mouse = UserInputService:GetMouseLocation()
+	-- IgnoreGuiInset is on, so GUI space and GetMouseLocation share the same
+	-- origin (true screen top-left); no inset compensation.
+	if mouse.X >= 0 and mouse.Y >= 0 then
+		updateMouse(Vector2.new(mouse.X, mouse.Y))
 	else
-		const mouse = UserInputService:GetMouseLocation()
-		-- IgnoreGuiInset is on, so GUI space and GetMouseLocation share the
-		-- same origin (true screen top-left); no inset compensation.
-		if mouse.X >= 0 and mouse.Y >= 0 then
-			updateMouse(Vector2.new(mouse.X, mouse.Y))
-		else
-			updateMouse(nil)
-		end
+		updateMouse(nil)
 	end
 
 	-- Keep calling run() even when the guest HLTs: Machine.run wakes idle
