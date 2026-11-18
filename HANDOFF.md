@@ -742,6 +742,33 @@ re-entering.
 - Program Manager captions: our generated group files used an 80px item pitch; now 110px (`ITEM_STEP_X`), windows widened, and
   WIN.INI gets `[Desktop] IconSpacing=110` (`Install.setIniKeyText`), so "Control Panel"/"Print Manager"/"Windows Setup" are whole.
 
+**R15 (2026-11-17): Win 3.1 standard-mode MS-DOS Prompt now launches, runs and exits; the swap-in resume faults.**
+Disassembled DSWAP.EXE/WSWAP.EXE with capstone (image offset = file offset - 0x200; DSWAP code segment at image 0x9D0, helper
+segment 0x1DA0). Root causes, all fixed with tests:
+- DSWAP's only `error=3` store (image 0x5AA1) is a memory check (image 0x5A6C): the DOS app's required KB (task block
+  `[es:si+0x1F]`, `[9]`) must fit in DSWAP's own block (`[0x44]` = its MCB size) minus DSWAP's resident size. WIN.COM reads
+  error 3 as "DOS app failed" and swaps Windows straight back in. Our EXEC gave non-NE EXEs only min+0x1000 paragraphs even
+  though DSWAP's header says maxalloc FFFF. `Dos.FN[0x4B]` now frees the ended DOSX/KRNL286 session and gives DSWAP every free
+  paragraph (test `dos_exec_dswap_takes_all_free_memory_after_reclaiming_the_session`). DSWAP also gets an EXEC return frame.
+- `Dos.FN[0x4A]` grow over a whole free neighbour (spare = -1) dropped the neighbour from the arena without growing the
+  block: DSWAP shrinks to 0x8D3, runs the DOS app, then grows back to 0x8F10 and lost ~140 KB, so WSWAP could not load
+  (`EXEC failed: no 13EB paragraphs`, "Fatal exit! Windows cannot be swapped back"). Test
+  `dos_4a_grow_over_the_whole_free_neighbour_keeps_its_paragraphs`.
+Result (`media/win31/probe31.lua --dosbox 2 --run command.com --key-at 14500000 --script "type:exit enter w4000000"`): the
+stand-in prompt shows the WINOLDAP banner and `C:\>`, typing `exit` returns, WSWAP#2 (swap-in) loads and runs.
+- New frontier (~14.534M steps): after the swap-in DOSX PM code returns through a zero selector
+  (`#GP: cannot load null selector into cs`, lastPC 005B:0BE2, stack ss=14AF sp=27C4 -> base 0x67430). Memory diff
+  against a snapshot taken at the DSWAP EXEC (`--diff-mem 1`, local probe flag): WSWAP#1 only saves ~56 KB, which is DOSX's
+  own block (`1426+575`, pages 0x11-0x19 are restored). The kernel block `199C+8664` (pages 0x24-0x9F, our stand-in for
+  KRNL286's extended-memory footprint, see the boundNE EXEC note) is NOT saved, but DSWAP now owns it and overwrites it, so
+  the resumed kernel finds its stack/heap clobbered. Real DSWAP never sees that memory because real KRNL286 keeps it in
+  extended memory. Options: (a) keep the KRNL286 block out of DSWAP's allocation and make the DOS app fit the ~41 KB left by
+  giving COMMAND a small PIF memory requirement; (b) back the kernel block with extended memory so DOS cannot hand it out;
+  (c) make our WSWAP path save it. (a) is the cheapest: find the PIF fields WINOLDAP copies to `[es:si+0x1F]`.
+- Local research flags added to `probe31.lua` (media/ is git-ignored): `--log-21 STEP` (every INT 21h with results and
+  paths), `--log-arena 1` (block map after 4A/4B/4C/48/49), `--diff-mem 1`, `--dosbox 2` (seeds the shipped
+  `fixtures/Command` stand-in instead of the 32-byte one).
+
 **R14 (2026-11-17): Win 3.1 standard-mode swap path decoded further; swap drive was A: (inverted IOCTL), DSWAP still ends with error 3.**
 Status note: the premise "standard mode never reaches a desktop" is stale - the ninth pass reaches Program Manager (~38M steps)
 and the probe still loads PROGMAN/USER/drivers by 41-42.6M. The open work is only the MS-DOS Prompt swap path. REA was not
