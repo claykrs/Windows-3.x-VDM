@@ -148,6 +148,12 @@ end
 
 -- --------------------------------------------------------------- host window
 local function viewportSize(): Vector2
+	-- the real desktop frame is the truth: in Studio the camera viewport can
+	-- differ from the ScreenGui area, which pushed the window to the top
+	const area = holder.AbsoluteSize
+	if area.X > 0 and area.Y > 0 then
+		return area
+	end
 	const current = Workspace.CurrentCamera
 	if current then
 		return current.ViewportSize
