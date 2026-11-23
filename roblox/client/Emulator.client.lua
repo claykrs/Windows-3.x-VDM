@@ -287,12 +287,14 @@ local function setStatus(text: string, detail: string, color: Color3)
 	statusDot.BackgroundColor3 = color
 end
 
+local function refit()
+	window.Gui.Size = fitWindow()
+	window:ClampToViewport()
+end
+cleaner:Connect(holder:GetPropertyChangedSignal("AbsoluteSize"), refit)
 const statusCamera = Workspace.CurrentCamera
 if statusCamera then
-	cleaner:Connect(statusCamera:GetPropertyChangedSignal("ViewportSize"), function()
-		window.Gui.Size = fitWindow()
-		window:ClampToViewport()
-	end)
+	cleaner:Connect(statusCamera:GetPropertyChangedSignal("ViewportSize"), refit)
 end
 
 -- ------------------------------------------------------------------- machine
