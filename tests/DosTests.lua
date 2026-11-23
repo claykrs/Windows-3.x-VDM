@@ -213,6 +213,74 @@ function DosTests.run(mkMachine, expect)
 
 	do
 		local m = mkMachine()
+		local e = expect("dos_swap_in_restores_the_kernel_block_dswap_was_handed")
+		-- KRNL286's memory is a conventional block here, but real DOS never
+		-- hands it to DSWAP (it lives in extended memory). EXEC of DSWAP saves
+		-- it; the swap-in WSWAP's last act (deleting its swap file) puts it back.
+		local header = string.pack(
+			"<c2I2I2I2I2I2I2I2I2I2I2I2I2I2",
+			"MZ",
+			5,
+			1,
+			0,
+			2,
+			0,
+			0xFFFF,
+			0,
+			0x100,
+			0,
+			0,
+			0,
+			0,
+			0
+		)
+		local image = string.char(0xB8, 0x00, 0x4C, 0xCD, 0x21)
+		m.vfs:writeFile("C:DSWAP.EXE", header .. string.rep(string.char(0), 512 - #header) .. image)
+		local krnl = m:dosAlloc(0x100)
+		m:dosSetOwner(krnl, 0x5555)
+		m.dos.sessionPsps[0x5555] = true
+		m.dos.kernelSessionPsps[0x5555] = true
+		local base = krnl * 16
+		for i = 0, 0xFF do
+			m.mem:write8(base + i, (i * 7 + 3) % 256)
+		end
+		local cpu = m.cpu
+		local name = "C:DSWAP.EXE"
+		for index = 1, #name do
+			m.mem:write8(cpu.ds * 16 + 0x10 + index - 1, string.byte(name, index))
+		end
+		m.mem:write8(cpu.ds * 16 + 0x10 + #name, 0)
+		for index = 0, 13 do
+			m.mem:write8(cpu.es * 16 + 0x40 + index, 0)
+		end
+		cpu.es = cpu.ds
+		cpu.r[3] = 0x10
+		cpu.r[4] = 0x40
+		cpu.r[1] = 0x4B00
+		Dos.FN[0x4B](m.dos, cpu, m)
+		e(not cpu:getF(1), "EXEC succeeds")
+		for i = 0, 0xFF do
+			m.mem:write8(base + i, 0xEE)
+		end
+		-- a delete by something that is not the swap-in leaves it alone
+		m.dos.currentPsp = 0x1234
+		m.dos.wswapPsps[0x4336] = true
+		for index = 1, #name do
+			m.mem:write8(cpu.ds * 16 + 0x10 + index - 1, string.byte(name, index))
+		end
+		cpu.r[3] = 0x10
+		Dos.FN[0x41](m.dos, cpu, m)
+		e(m.mem:read8(base) == 0xEE, "an unrelated delete keeps the dswap contents")
+		m.dos.currentPsp = 0x4336
+		Dos.FN[0x41](m.dos, cpu, m)
+		e(
+			m.mem:read8(base) == 3 and m.mem:read8(base + 0xFF) == (0xFF * 7 + 3) % 256,
+			"swap-in restores the kernel block"
+		)
+	end
+
+	do
+		local m = mkMachine()
 		local e = expect("dos_4a_grow_over_the_whole_free_neighbour_keeps_its_paragraphs")
 		-- DSWAP shrinks its block, runs the DOS app, then grows back to its
 		-- original size, which is exactly the block plus its free neighbour.

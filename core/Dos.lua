@@ -54,6 +54,9 @@ export type Dos = {
 	allocStrategy: number,
 	execFrames: { [number]: any },
 	sessionPsps: { [number]: boolean },
+	kernelSessionPsps: { [number]: boolean },
+	wswapPsps: { [number]: boolean },
+	savedKernel: { { linear: number, data: buffer } }?,
 	kernelPsp: number?,
 	umbLink: number,
 	pendingLine: string?,
@@ -92,6 +95,9 @@ function Dos.new(machine: Host): Dos
 	self.allocStrategy = 0
 	self.execFrames = {}
 	self.sessionPsps = {}
+	self.kernelSessionPsps = {}
+	self.wswapPsps = {}
+	self.savedKernel = nil
 	self.kernelPsp = nil
 	self.umbLink = 0
 	self.pendingLine = nil -- partial AH=0A input across keyboard waits
@@ -760,7 +766,24 @@ Dos.FN[0x40] = function(self: Dos, cpu: any, machine: Host) -- write to handle
 	ok(cpu)
 end
 
+-- Put back the extended-memory stand-in saved when DSWAP was handed it.
+local function restoreKernel(self: Dos, machine: Host)
+	const saved = self.savedKernel
+	if saved then
+		self.savedKernel = nil
+		for _, item in saved do
+			buffer.copy(machine.mem.buf, item.linear, item.data, 0, buffer.len(item.data))
+		end
+	end
+end
+
 Dos.FN[0x41] = function(self: Dos, cpu: any, machine: Host) -- delete file
+	-- The swap-in (WSWAP after DSWAP) deletes its swap file as its last act and
+	-- then enters the resumed DOSX, which never returns through AH=4C: this is
+	-- the point where Windows' memory is back, so return the kernel block.
+	if self.currentPsp and self.wswapPsps[self.currentPsp] then
+		restoreKernel(self, machine)
+	end
 	const gone, err = machine.vfs:delete(self:readAsciz(cpu))
 	if not gone then
 		fail(cpu, err or 2)
@@ -1087,16 +1110,31 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 	-- caller (WIN.COM) is running again, but DOSX leaves for WIN.COM without a
 	-- DOS terminate, so its blocks were never released. DOS would have freed
 	-- them on AH=4C; a swapper / DOS box EXEC needs that memory.
-	local function reclaimSession(): boolean
+	local function reclaimSession(saveKernel: boolean): boolean
 		if next(self.sessionPsps) == nil then
 			return false
 		end
 		const stale: { number } = {}
+		const saved: { { linear: number, data: buffer } } = {}
 		for _, block in machine.memBlocks do
 			if self.sessionPsps[block.owner] then
 				stale[#stale + 1] = block.start
+				if saveKernel and self.kernelSessionPsps[block.owner] then
+					-- real KRNL286 keeps its memory in extended memory, out
+					-- of DSWAP's reach and not part of the WSWAP swap file;
+					-- here it is a conventional block DSWAP will overwrite,
+					-- so keep a copy for the swap-in to put back
+					const linear = lshift(block.start, 4)
+					const data = buffer.create(block.size * 16)
+					buffer.copy(data, 0, machine.mem.buf, linear, block.size * 16)
+					saved[#saved + 1] = { linear = linear, data = data }
+				end
 			end
 		end
+		if #saved > 0 then
+			self.savedKernel = saved
+		end
+		self.kernelSessionPsps = {}
 		for _, start in stale do
 			machine:dosFree(start)
 		end
@@ -1144,14 +1182,14 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 			then math.max(minimumParas, machine:dosLargest())
 			else minimumParas
 		if isDswap and buffer.readu16(buf, 0x0C) == 0xFFFF then
-			reclaimSession()
+			reclaimSession(true)
 			programParas = math.max(minimumParas, machine:dosLargest())
 		end
 	else
 		programParas = math.max(0x100 + math.ceil(buffer.len(buf) / 16), 0x1000)
 	end
 	local pspSeg = machine:dosAlloc(programParas)
-	if not pspSeg and reclaimSession() then
+	if not pspSeg and reclaimSession(false) then
 		pspSeg = machine:dosAlloc(programParas)
 	end
 	if not pspSeg then
@@ -1177,6 +1215,12 @@ Dos.FN[0x4B] = function(self: Dos, cpu: any, machine: Host) -- EXEC
 		or string.find(string.upper(path), "KRNL286%.EXE$")
 	then
 		self.sessionPsps[pspSeg] = true
+		if string.find(string.upper(path), "KRNL286%.EXE$") then
+			self.kernelSessionPsps[pspSeg] = true
+		end
+	end
+	if string.find(string.upper(path), "WSWAP%.EXE$") then
+		self.wswapPsps[pspSeg] = true
 	end
 	if string.find(string.upper(path), "KERNEL%.EXE$") and self.kernelPsp == nil then
 		-- the real-mode Windows kernel is running from here on: every later
@@ -1239,6 +1283,10 @@ Dos.FN[0x4C] = function(self: Dos, cpu: any, machine: Host)
 		-- EXEC child ends: free its blocks and resume the caller just after
 		-- its INT 21h (through the stub's IRET when the call was chained).
 		self.execFrames[psp] = nil
+		if self.wswapPsps[psp] then
+			self.wswapPsps[psp] = nil
+			restoreKernel(self, machine)
+		end
 		const owned: { number } = {}
 		for _, block in machine.memBlocks do
 			if block.owner == psp then

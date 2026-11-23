@@ -742,6 +742,12 @@ re-entering.
 - Program Manager captions: our generated group files used an 80px item pitch; now 110px (`ITEM_STEP_X`), windows widened, and
   WIN.INI gets `[Desktop] IconSpacing=110` (`Install.setIniKeyText`), so "Control Panel"/"Print Manager"/"Windows Setup" are whole.
 
+**R15 follow-up (2026-11-23): swap-in resume fixed.** Chose option (c): `Dos` copies the KRNL286 block when EXEC hands DSWAP the
+reclaimed memory (`savedKernel`) and puts it back when the swap-in WSWAP deletes its swap file (its last INT 21h before
+entering the resumed DOSX; WSWAP never ends with AH=4C). Probe run (`--steps 22000000`) no longer faults at 14.534M, the VGA is
+back in mode 12h with content. Test `dos_swap_in_restores_the_kernel_block_dswap_was_handed`. Not yet verified: a full
+Program Manager repaint after the resume (only checked mode and non-zero VGA bytes).
+
 **R15 (2026-11-17): Win 3.1 standard-mode MS-DOS Prompt now launches, runs and exits; the swap-in resume faults.**
 Disassembled DSWAP.EXE/WSWAP.EXE with capstone (image offset = file offset - 0x200; DSWAP code segment at image 0x9D0, helper
 segment 0x1DA0). Root causes, all fixed with tests:

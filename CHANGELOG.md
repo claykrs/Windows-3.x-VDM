@@ -15,7 +15,7 @@ all 20 bundled applications, mouse and keyboard, and the MS-DOS Prompt.
   memory), `INT 21h AH=4A` growth over a free neighbour, drive types for the
   swap file (`AH=44/08`, `AH=36`), reclaiming the ended DOSX/KRNL286 session,
   and seek-past-EOF zero fill. Resuming Windows after the swap-in is open
-  (HANDOFF.md, R15).
+  (HANDOFF.md, R15; fixed afterwards by restoring the kernel block).
 - Release models and archives contain emulator source only. Earlier releases
   attached Microsoft media; this one does not, and the README no longer
   points at it.
