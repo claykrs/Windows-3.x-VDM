@@ -1,0 +1,1907 @@
+# HANDOFF — RVDM (8086 DOS machine → Windows 3.0a in Roblox)
+
+Resume here after context compression. Everything below is verified state as
+of the R7 pass: all 20 SETUP.INF applications still render in Windows 3.0a,
+Microsoft Tetris 2.0 is playable, the 8042 keyboard and 1:1 PS/2 pointer work
+with a single visible cursor, PC speaker output is wired, Windows 3.1's WIN.CNF
+now reaches DOSX, enters protected mode, completes the ring-3 handoff, the
+first ring-3→ring-0 call gate, IDT-delivered INT3, the compact real-callback
+IDT selection and the clear-PE switch helper, and `lune run tools/check.lua`
+passes with 924 assertions.
+
+## Current state (2026-11-06, R8)
+
+- Mouse proven end-to-end in a live Studio boot: bridge-driven absolute
+  targets map 1:1 in X and +58 px constant in Y (five-point affine fit,
+  slope exactly 1.0; packets drain under 0.5 s, so there is no delivery
+  stall). The bias lives inside the guest driver, not the host sink — it
+  survived changing the sink geometry. The client compensates through
+  `MOUSE_DRV_Y_BIAS = 58` in `Emulator.client.lua`; with it, a synthetic
+  click at the OK button dismisses Tetris' About dialog, and the rendered
+  arrow coincides with the host pointer. Calibration driver:
+  `tools/out/driver.py` (git-ignored).
+- Win 3.1 R8 **root cause found and fixed** (probe `media/win31/probe31.lua`,
+  logs `tools/out/p31_r8*.log`, commit `3836f1f`): the silent "40M instructions
+  in PM with PC advancing" was the CPU executing zeroed memory. Chain:
+  DOSX claims all XMS (handle 1 = `0x110000 + 0x2F0000`) and copies its PM
+  image to the bottom of that region (image at start + `0x920`, GDT at
+  start + `0x800`); the KRNL286 EXEC ran `Dos.lua`'s `xms:releaseAll()`
+  (the DOSX-to-kernel handoff), which orphaned the image; WSWAP's swap-block
+  allocation then first-fit onto the same bytes (`handle 2 = 0x110000`) and
+  its swap-out moves zeroed the PM code; the next far transfer to selector
+  `0x53` marched through zeros with IF=0 forever. Fixes: `Xms.allocate` now
+  allocates from the highest free gap (top-first) so post-handoff blocks
+  never touch the bottom-resident image, the handoff release stays in EXEC,
+  and XmsTests pin both. Probe gotchas recorded along the way: `--xms` as
+  the last argv token silently no-ops (`argValue` needs a following token),
+  and the fake-XMS stub path fails WIN.COM's HIMEM validation ("Invalid
+  HIMEM.SYS") — the no-`--xms` boot is the productive one.
+- New R8 frontier (`tools/out/p31_r8t.log` → `p31_r9c.log`): with the XMS fix
+  the kernel executes real PM code past the swap handoff. The current fault:
+  KRNL286 walks its **global heap** (linked list, head at `es:[0x22]`, node
+  link/flag at `+4`/`+8`) through ring-3 LDT selector `0x03F7`
+  (base `0x10FA10` in the HMA, limit `0x5AF`) and reaches node offset
+  `0xF4CC` — far past the limit — so `linear()` raises `#GP`.
+- **Proven (`p31_r9c.log`): the heap bytes were never corrupted.** Step-0
+  snapshot shows the region zeroed, the write-spy (armed from step 0, window
+  `0x10FA00-0x10FA60`, all write paths covered) sees only the kernel's own
+  writes at `0x10FA00-0x0E` below the heap base, and A20 is ON at the fault.
+  The `0xF4CC` in BX came from a read made **while A20 was off**: WSWAP
+  toggles local A20 (XMS AH=05/06 pairs, ~6000 steps apart) around its swap
+  loop, and a heap read during a disable window wrapped `0x10FAxx` to
+  `0x0FAxx` (low-memory garbage, `CC F4` bytes = INT3/HLT pairs from the
+  stub region at segment `0x0FA1`). The kernel retained the garbage in BX
+  and faulted after A20 was re-enabled.
+- **Expand-down data segments are implemented and committed** (`4a1afe1`):
+  the direction bit is tracked per segment register, `linear()` validates
+  `(limit, upper]`, and PM↔RM state saves it. (The faulting selector turned
+  out to be expand-UP, but KRNL286 uses expand-down ring-3 segments later —
+  decode the access byte's type field: bit2 = direction, not the DPL.)
+- **Next (superseded):** the A20-window fixes (a)/(b) below were the plan
+  when the fault looked A20-driven; the closed R9 question and the overlap
+  finding show the final fault runs entirely with `a20=true`, so the A20
+  scoping work is parked until a fault actually shows wrapped access.
+  Earlier candidate fixes kept for reference: (a) model XMS *local* disable
+  as scoped to the RM callback invocation — the PM kernel's accesses must
+  not wrap while WSWAP holds a local disable (this mirrors how real DOSX
+  scopes the local A20 to its real-mode callback); (b) make A20-off reads
+  of HMA-resident PM objects fail loudly instead of reading wrapped low
+  memory.
+- **R9 final state (`p31_r9c.log`/`p31_r9g.log`, the write-spy closed the
+  case):** the heap "corruption" is the kernel's own initialization.
+  KRNL286 at `02EF:B319` (step 138k) fills the global-heap header and free
+  chain (`0x10FA10+`, word `0xF4CC` markers) through a window selector, and
+  the faulting walk (`GlobalAlloc` free-list scan, `02EF:6CC6..6CD6`,
+  `mov es,[bp+12h]` = a caller-supplied selector) reads the header's table
+  base `0xF4CC` and walks past the **header selector's limit**. The limit
+  was written once by DOSX's RM code (`50AB:0093`, step 14k) as
+  `{base 0x10FA10, limit 0x5AF, access 0xF3}` and never rewritten — while
+  the kernel initializes a ~64 KiB table. So the real question is now
+  narrow: **why did DOSX size the heap-header selector at 0x5AF** — the
+  limit comes from a value DOSX computed at creation time, likely from a
+  query we answer differently (HMA free size / XMS free / DOS memory size).
+  Disassemble the `50AB:0093` descriptor-build path (the write follows
+  `EB 43 90 58 57`, next to the "SMARTAAR" strings) and trace the limit's
+  register source; fix the query and the whole walk should proceed.
+  Everything up to this point is committed and pushed (`b1c417d`).
+- **R9 QUESTION CLOSED (`p31_r9h`..`p31_r9x.log`, 2026-11-06): the 0x5AF
+  limit is NOT a query answer and DOSX never builds it.** Two premises of
+  the previous state were wrong:
+  1. The `SPY writer code: ... EB 43 90 58 57 ... SMARTAAR` dump fired on
+     the probe's own step-0 `write16(0x10FA10, 0xBEEF)` with the CPU still
+     at its initial `1000:0100`, so it dumped preloaded bytes at physical
+     `0x10100` — nothing to do with DOSX (the probe now prints
+     `[cs=... ip=... base=... cb=... step=... kind=... addr=...]` on that
+     line so it cannot be misattributed again). At step 14000,
+     `cs=50AB ip=0093` is the **EXEPACK stub copy** (load segment 0x340D;
+     the stub self-copies to `load+0x1C9E` = 0x50AB) unpacking DOSX, and the
+     8 writes to `0x40040..47` are the unpacked image's last bytes, not a
+     descriptor build.
+  2. The `{base 0x10FA10, limit 0x5AF, access 0xF3}` descriptor is written
+     by **KRNL286 itself** through the internal DPMI handler: `INT 31h
+     AX=000C` (Set Descriptor) lands in `02EF:279F`, whose `al=0Ch` branch
+     copies an 8-byte descriptor from `ES:DI` to the LDT (`02EF:27C1..27E5`).
+     The caller built `{limit 0x5AF, base 0x10FA10, acc F3}` on its stack
+     (es=ss=0x27F, di=0x13E) and set **selector 0x3F4 = the kernel's own
+     initial data-segment/module-database block (0x5B0 bytes)** at step
+     ~138k. All descriptor traffic into the live LDT (base 0x3EFC50) is now
+     visible via the probe's `DPMISET`/`SELBUILD`/`LDTW`/`LDTCP` hooks.
+- **New R9 frontier (`p31_r9t`/`p31_r9u`/`p31_r9x.log`): overlapping
+  allocation wipes the module database.** The full sequence at fault:
+  1. ~138k: kernel allocates the database block 0x5B0 @`0x10FA10`
+     (selector 0x3F4) and initializes it — NE-header copy (0x40 bytes,
+     copied by `02EF:B317` from the parsed header at ds=0x397) plus
+     `[0x1c]=4` entries and `[0x22]=0x40` table base (`02EF:B319`).
+  2. 112k-114k: the kernel also writes database fields into the **DOS-load
+     image** through alias ds=0x2F7 (base 0x8FDB0): `02EF:B524 mov [0x30],bx`
+     writes `0x2E7` (the eventual handle-table capacity) and `02EF:B5A4 mov
+     es:[0x32],ax` writes `0x9B` at image+0x30/0x32 — i.e. record fields at
+     image+0x30 = record[0x1c] if the record head sits at image+0x14.
+     The record *head* is never written into the image (fill stays).
+  3. 144k: the loader learns seg1's real size (`cx=0xB6CB` — the NE data
+     segment is 0xB6CB bytes at file 0x1620, seg table unit 16), creates
+     selector 0x314 = `{base 0x10FA10, limit 0xFFFF}` via `02EF:22E8..22FD`
+     — **the same base as the database block** — then `02EF:729A` moves
+     0xB6CA bytes from `02EF:0` (the raw DOS-load image, whose first 0x30
+     bytes are `CC F4` fill) into `0x317:0`, **wiping the initialized
+     database header** (`[0x1c]`: 4 → 0xF4CC, `[0x22]`: 0x40 → 0xF4CC).
+  4. The loader's handle-table walk (`02EF:6C9A..6CD2`, `mov es,[bp+12h]`
+     = the stale selector 0x3F7, limit 0x5AF) then reads `[0x22]=0xF4CC`,
+     computes offset 0xF4CC, and faults on the 0x5AF limit. Every HDR-trace
+     access in the final run had `a20=true` — the R9c A20-wrap theory is
+     not involved in this fault.
+  **R9 SOLVED (`p31_r10*`/`p31_r11*.log`, 2026-11-12): our LAR/LSL set ZF
+  backwards.** The overlap was never an allocator bug — the whole
+  XMS/DOS-HMA suspect list was clean (the HMA pool chain in the DOSX data
+  segment is guest-managed and self-consistent; the kernel's own hi-heap
+  MCB chain spans `0x101040`..`0x10FFD0` with a free 0xE99-para node at
+  `0x101060`, and its GlobalAlloc deliberately last-fits the tail). The
+  real chain of events: seg1's record (`[si+8]`, at the DB table base
+  `[0x22]`=0x40) holds selector 0x0407 whose block `{base 0x54DB0, limit
+  0xB6CF}` is KRNL286's DGROUP home in DOS memory; the loader validates it
+  with `lar ax,sel / jne invalid` (`02EF:0ED7..0EDC`) and then resolves
+  the block's current home through the handle-table chain
+  (`0x21B1` = `ds=cs:[0x30]:[0x21a]` table at `0x50D82`,
+  slot `(sel & 0xF8)>>2`; `0x221F` follows node `[0xA]` links until one
+  equals the original selector; block-header windows like 0x3AF@0x54DA0
+  hold `[0xA]`=0x0407). With **correct** LAR semantics (`ZF=1` on success,
+  access byte in AH) `jne` is not taken, the chain resolves 0x0407, and
+  `229C(0x0407)` extends selector 0x0404's descriptor to `{0x54DB0,
+  0xFFFF, F3}` so the 0xB6CB-byte DGROUP move lands in DOS memory. Our
+  LAR/LSL inverted ZF (true on failure, false on success) and leaked
+  `flags&0xF0` into AL, so `jne` fired, `0xED1` returned the raw LAR value
+  (0xFB00), the fallback chain ended on the DB block, and `229C` extended
+  the DB selector 0x3F4 instead — moving seg1 ONTO the heap/DB header and
+  wiping `[0x22]` to 0xF4CC, which faulted the very next walk. The file's
+  own `CC F4` fill at seg1 start (verified in KRNL286.EXE at 0x1620) made
+  the wiped words look like "trap fill". Fix: `core/Cpu.lua` `larLsl` now
+  sets ZF=1 on success / 0 on failure and 16-bit LAR returns
+  `{AH=access, AL=0}`; `tests/PmCpuTests.lua` pins the Intel semantics.
+  Also fixed while auditing the suspect list: `core/Xms.lua` AH=08h now
+  returns AX=total/DX=largest and AH=88h AX=largest/DX=total per the XMS
+  spec (values are equal on the fresh 4 MiB pool, so DOSX never noticed).
+- **New R10 frontier (`p31_r11c.log`): boots to a real-mode wild return.**
+  With the fix the boot runs fault-free: the kernel loads its remaining
+  segments (seg2 runs at cs=0x0407 `{0x54DB0, 0xB6CF}`, seg3 at cs=0x040F
+  `{0x10CF50, 0x2AAF}` in extended memory), the DB walk reads `[0x22]=0x40`
+  intact, and at step 162529 the machine has flipped back to real mode
+  (CR0.PE=0) with CS=DS=ES=SS=0x0C9B and far-returns into `FFFF:10FD`
+  (ROM BIOS area), where an INT 20h/27h-class stub ends the boot with
+  `exit=0` (`MACHINEEXIT ... ret=FFFF:10FD`, ~18.5k steps past the old
+  fault). Next question: what is 0x0C9B (which real-mode phase) and why
+  does its return address point into the BIOS — a stale IVT/stack vector
+  on our side, or a guest phase we stubbed out?
+- **Probe hooks for this area** (`media/win31/probe31.lua`, all under
+  `--trace-dosxrm 1`, which must NOT be the last argv token — `argValue`
+  needs a following value): `DPMISET` (every internal Set Descriptor with
+  the source descriptor bytes and caller), `SELBUILD` (02EF:1ECB entries
+  with caller return address; `BX=03F4` also dumps 40 stack words),
+  `LDTW`/`LDTCP` (writes into LDT entries ≥0x5E, incl. entry 0x62 at
+  0x3EFF60), `TPL`/`DRV` (template-region watch + derivation trace),
+  `HDR` (reads+writes of `0x10FA00..0x10FA40` with a20 state), `IMG`
+  (writes to the image head `0x8FDB0..0x8FDF0`), plus XMS `EDD` decoding on
+  AH=0Bh lines, and `--dump-pm 1` now dumps raw LDT bytes `0x3EFF40..0x3EF9F`
+  at fault.
+- Win 3.1 R7-era observation kept for reference: `INT 16h AH=6F` is an
+  unhandled-but-non-fatal probe on this path.
+- Studio note: after a Studio reopen the instance id changes; the deploy
+  tools' default `STUDIO_ID` must match the live instance (both
+  `tools/studioDeploy.lua` and `tools/studio_deploy.lua` are updated; the
+  duplicate should be reconciled to one file).
+- **R10 root-cause lead (arena probe):** the RM exit is a DOS memory failure,
+  not a callback bug. The probe's int21 trace shows the RM phase's final
+  sequence: `4A seg=0x1000 new=4112` → `48 req=4000 -> 8209 ok` →
+  `4A seg=0x1000 new=239` → `48 req=100 -> 2049 ok` → **`48 req=65535 -> 8
+  cf=1`** → resizes → `48 req=4096 -> 9031 ok` → exit. The guest probes
+  "largest free block" with a 0xFFFF-paragraph request, and its own MCB
+  chain walk answers **8 paragraphs** — yet the very next 4096-paragraph
+  alloc SUCCEEDS, so our internal memBlocks hold thousands free while the
+  MCB chain the guest reads is broken/fragmented. DOSX takes its
+  insufficient-memory path, far-returns on a stale stack (FFFF:10FD), and
+  exits with code 0. Fix target: MCB-chain coherence — verify every
+  alloc/resize/free keeps the guest-visible MCB walk consistent
+  (syncArena writes MCBs for blocks index>1 only; chain integrity means
+  next-MCB = start + size + 1 must line up after every mutation, and the
+  0x0800 MCB must match block 3). Reproduce with
+  `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
+  --steps 200000` (flag not last argv) — the int21 `48 req/4A seg` trace
+  plus MACHINEEXIT at 0C9B:3652 is the failure signature.
+- **R10 SOLVED (arena coherence): three real bugs, all fixed.** The probe's
+  `-> 8` was AX=error-code-8 printed decimal, and `brk_avail` was BX; the real
+  damage was in the arena itself. Per-mutation arena dumps (probe31
+  `--dump-arena`, local-only) caught the exact mutations:
+  1. `dosFree` merge dropped the neighbour's MCB paragraph
+     (`size += next.size`); every alloc→free round lost one paragraph off the
+     chain, derailing the guest walk ("bad MCB id 0 at 0xfbe" in the stress).
+     Fix: merged runs absorb the neighbour MCB para (`+= next.size + 1`, and
+     `previous.size += block.size + 1`).
+  2. Dos `FN[0x4A]` grow set `next.size = spare - 1` — the grown block ate one
+     paragraph of the free neighbour, so the last MCB ended at 0x9FFF/0x9FFE/
+     0x9FFD instead of 0xA000 (three grows in the probe = three lost
+     paragraphs). Also: spare 0/-1 exact fits dropped the neighbour's MCB para
+     or left it unchained, and shrink never merged the freed tail into a
+     following free block (fragmentation: brk_avail 32749 instead of 36624).
+     Fix: `next.size = spare`; spare ≤ 0 hands the whole region over
+     (spare==0 → size+1); shrink remainder merges into a free neighbour.
+  3. `dosReserve` was not atomic: it consumed free blocks (`table.remove`)
+     and THEN failed on an owned block, leaving gaps a stale MCB bridges
+     (stress step 138: walk saw an extra MCB at 0x1200). It also mis-sized
+     zero-para remainders and mishandled reservations ending exactly on the
+     next block (swallowing its MCB paragraph) or a block larger than the
+     reservation (silently dropping the leftover). Fix: validate ownership
+     first, then apply; re-home the neighbour's MCB paragraph when endSeg
+     lands on it; carve the leftover free (merging) when the block was larger.
+  Tests: `tests/MachineTests.lua` now walks the guest-visible MCB chain in
+  emulated memory (id 0x4D/0x5A, next = seg+size+1, end == arenaTop, no
+  adjacent frees, walk-largest == dosLargest) after every mutation of a
+  240-step seeded alloc/free/resize/reserve stress, plus focused tests for
+  each bug; suite is 924 assertions.
+- **R10 probe outcome after the fix + new frontier (R11: terminate vs
+  continue).** The arena is coherent end-to-end (`end=A000` after every
+  mutation). The 0xFFFF probe now fails with the TRUE largest:
+  `48 req=65535 -> 8 cf=1 brk_avail=36624` (0x8F10 — the merged tail), and
+  every RM-phase alloc/resize succeeds at sane segments (wswap PSP 0x10F0,
+  KRNL286 PSP 0x1426, the 4096-para alloc at 0x30D6). The boot still ends at
+  0C9B:3652 — but that is NOT a memory failure. With `--dump-exit` the
+  executed bytes at CS:IP are `CD 20` and CS:IP = 0xC9B0+0x3650 = linear
+  0x10000 = **PSP:0000**: the DOSX/KRNL286 RM glue deliberately jumps to
+  PSP:0000 and executes the PSP's INT 20h terminator (the bytes just below
+  are the PSP block's own MCB, `4D 08 00 EF` = owner 8 size 239 — exactly the
+  post-shrink chain). In real Windows 3.1 standard mode the WIN.COM/DOSX DOS
+  process legitimately terminates once the PM kernel is up; the kernel keeps
+  running in PM and later reaches DOS only through DOSX's resident RM
+  callbacks. Our `defaultInts[0x20]`/`machine.exit` kill the whole machine
+  instead. Next step: model DOS-process terminate as "process over, machine
+  keeps running" for the 3.1 track (parent/child EXEC resume via INT 22h /
+  PSP:000A, or a PM-owns-the-boot flag), then the PM kernel should continue
+  past step 162k.
+## R11 — SOLVED: terminate-vs-continue; new frontier R12
+
+The RM "wild return" was the WIN.COM RM glue legitimately terminating its DOS
+process (PSP:0000 `CD 20`) once the PM kernel was up. Fix: `dosTerminate`
+(core/Machine.lua) — with the DOSX-resident flag set (PM→RM switch with the
+LDT active, or LMSW dropping PE), a terminate jumps to the terminating PSP's
+INT 22h parent-resume address (x86 far pointer: offset at PSP:000A, segment
+at PSP:000C; observed 010B:1861) instead of ending the machine. Plain-DOS
+terminates still exit. Tests in tests/DosTests.lua (resume, plain exit,
+missing-resume fallback). Gate: 928 assertions, CHECK PASSED.
+
+Result: the boot now continues past the terminate (step 162k) into the
+kernel's next phase and reaches step 176k before the new frontier:
+
+**R12 — PART 1 SOLVED (cpu: pm-restore reread)**: the 0x427:0xFFF0 fault was
+NOT a descriptor-limit problem. Chain: (a) the IRET pmSaved restore path
+stomped `segBase.cs = pm.segBase.cs or lshift(csSel, 4)` — pm.segBase.cs was
+never snapshotted, so every restore aliased the PM code selector (0x5B, GDT
+entry 0x58 base 0x18610) to csSel*16 = 0x5B0 and execution dove into linear
+garbage (environment strings) until a stray [ds:0xFFF0] faulted; (b) stale
+`segLimit/segAccess` restores could also shadow DPMI-era limit grows. Fix: the
+restore now re-reads ALL segment caches via `loadSeg` (correct 286 IRET
+cache-reload semantics) and the snapshot stomp lines are gone. Gate: CHECK
+PASSED.
+
+**R12 — PART 2 (SOLVED DIAGNOSIS, 2026-11-13): the image is NOT truncated —
+KRNL286's PM pool clobbers it, and the second PM re-entry walks into the
+clobber.** The boot's old "image ends at 0x175C" reading was an end-state
+artifact. The full verified chain:
+
+1. **The copy completes and the image is FULL.** WIN.COM EXECs WSWAP.EXE
+   (psp 0x10F0, step 6000; its BSS fill at 1133:0E3A zeroes 0x18610..0x23E30),
+   then DOSX.EXE (psp 0x1426, load image 0x14360, step 12000). The EXEPACK
+   stub (entry cs=0x1BF4) unpacks: DGROUP -> 0x1436, resident image ->
+   0x2942 (0x35F0 bytes, entry 0x2942:000A), PM code -> 0x2CA1 (0x4330
+   bytes), unpacker copy -> 0x30D4. Decompressed span 0x14360..0x30D3F =
+   0x1C9E0 bytes exactly. The DOSX loader (2942:3540..35C0, all constants
+   verified genuine by an offline Python EXEPACK unpacker of the real file —
+   chunk format [payload][count:2][ctl B0=fill/B2=copy, bit0=last], stream
+   read backward from file 0x7DDF, output written backward from linear
+   0x30D3F, 128 chunks, byte-identical to our memory at the loader):
+   writes the loader table to es=0x1861 (2942:316A, 0x7D pairs), moves
+   PM data (0x920 bytes from 0x1861) + PM code (0x4330 from 0x2CA1) to
+   XMS EMB#2 at 0x3EB000 (steps 42000), then rep movsb 0x35EC bytes from
+   staging ds=0x5B (0x29420) to es=0x4B+di=0x42B0 = **0x18610..0x1BBFC
+   (steps 44000, completes with cx=0, si=0x35EC)** — DST-STATE buckets
+   +0000..+3500 all ~230-256/256 nonzero at copy exit — then patches
+   GDT[0x58] base to 0x18610 (2942:35A1..35B8; the earlier desc 0x29420 was
+   the staging). [0x100] = 0x42B0 (written 2942:2B50: align16([2f63]*[2f6f]
+   + 0x30B0); [2f63]/[2f6f] are runtime-clamped loader params), [0x136] =
+   0x1426 (PSP), [0x148] = 0x1861 (image start segment).
+2. **The glue shrink releases the image tail — guest-faithful.** AH=4A
+   es=0x1426 bx=0x575 (caller 1861:00D4, step 112000): bx = 0x13A +
+   [0x148] - [0x136] = 0x13A + 0x1861 - 0x1426. The 0x13A0-byte constant is
+   genuine in the decompressed glue (image+0xBD: `mov bx,0x13A0; shr bx,4;
+   add bx,[0x148]; sub bx,[0x136]`). Block 0x1426..0x199B; free arena
+   0x199C..0xA000. Geometric invariant: the image spans [0x148]..+0x35F
+   paras but the keep only covers +0x13A — **the image tail above +0x13A0
+   (0x224C bytes, 0x199B0..0x1BBFC) is ALWAYS released, on real hardware
+   too.** The shrink is unconditional in the glue's success path (call
+   1861:1C0C = the KRNL286.EXE path resolver at image+0x1C0C — "PATH\0
+   WINDIR\0" string scan + INT 21h AH=43h attr checks — returns NC when
+   found, then jnc -> shrink).
+3. **KRNL286's PM pool clobbers the released tail.** WIN.COM EXECs
+   KRNL286.EXE (psp 0x199C, bound NE top-mapped at 0x8EA2, step 112000).
+   KRNL286 init (PM 02EF, base 0x8FDB0) builds its PM pool: selector 0x3A4
+   base **0x19BF0** limit 0x408F (= KRNL286 PSP+0x23 paras, size default
+   0x4000 since DGROUP word [0x324] bit 0x20 is clear and [0x32]==0), then
+   02EF:B251 (`xor ax,ax; xor di,di; rep stosw`) zeroes 0x4070 bytes =
+   linear 0x19BF0..0x1DC80 = **image offsets 0x15E0..0x5670** — the resident
+   image's tail INCLUDING the stub's call target at image+0x2971. KRNL286
+   *expects* PSP+0x10/PSP+0x20 to be free pool space (it converts segments
+   0x19AC/0x19BC via DPMI AX=0002, seen at 02EF:27A3) — the collision is
+   only with DOSX's released image tail.
+4. **The second PM re-entry walks into the clobber.** At step 162000 an RM
+   process terminates (0C9B glue, registers zeroed — the R11 resume path)
+   and the resume re-enters PM at the resident-image **stub 0x5B:000A**
+   (IMGSTUB 162000, csBase=18610, sp=0xFE2 ss=0x27F). The stub runs
+   (ax=0x1436, ds=ss=0x1436, sp=0x100), executes its `call +0x2956` at
+   image+0x18 -> 0x2971 = ZEROED -> slide -> the 168k fault.
+5. **The skipped EMB switch is the divergence.** DOSX loader phase 2
+   (image+0x11E0): `INT 2Fh AX=1607h BX=0x14` (Windows-being-loaded notify),
+   then `mov cx,es; jcxz` — **if ES comes back 0 the 0x40-word response table
+   copy to DGROUP [0x2CA8] is skipped** — then `call 0xa60` (the XMS copy)
+   and **`ljmp 0x53:0x3BD6`** — selector 0x53 base 0x3EB920 = the EMB PM
+   code (the R10-era boots ran cs=0x53 there!). Our core answers 1607 with
+   nothing (es stays 0), the table copy is skipped, and the second re-entry
+   still dispatches into the resident image instead of the EMB-based PM
+   code. The R10-era boots (pool at HMA 0x101030, cs53=3EB920) got further
+   through this same path before the R11/R12 fixes.
+6. Supporting facts: KRNL286's DPMI check (image C8E5 = PM 02EF:B4CB:
+   INT 2Fh AX=1687) PASSES in our boot (ax==0 — answered somewhere in the
+   hook chain), the DPMI mode-switch lcall runs, and KRNL286's DOS-alloc
+   service 13BBF allocates its new DGROUP via DPMI selector services. The
+   KRNL286 no-DPMI branch (image C9F9) prints an error at cs:0x9921 and
+   terminates AH=4C FF — it did NOT run in our boot.
+7. Probe tooling added (all gitignored, media/win31/probe31.lua):
+   `--watch-imgw` (image writers 0x18610..0x18660 + copyFrom into
+   0x18610..0x23000 + GDT[0x58] change tracer + EXECW landing probe +
+   end-of-run IMGMAP), `--watch-staging`, `--watch-copy` (COPYLOOP state at
+   the 005B:359B copy exit + SRC/DST bucket maps), `--watch-zero` (ZERO2
+   image-tail zero writer + TRACE4A shrink callers + SZW [0x136]/[0x148]/
+   [0x100] writers + SZTABLE + LOADER/GLUE/CALLEE hexdumps + ZEROCODE),
+   `--watch-callee`, `--watch-entry` (IMGSTUB 0x000A entries + retro dump),
+   `--watch-a20`, `--trace-31` (PM INT 31h instructions), `--trace-dpmi`,
+   XMS prints now carry steps. Run:
+   `./tools/bin/lune.exe run media/win31/probe31.lua --trace-dosxrm 1
+   --watch-imgw --steps 400000`.
+
+**R12 part 3 (first pass, 2026-11-13): the "skipped EMB switch" framing was
+wrong — the phase-2 blocks are overlay-chain code OFF this boot's path, and
+the real divergence is the KRNL286 EXEC block placement.** Verified this pass:
+
+- **The INT 2Fh hook chain is healthy.** WIN.COM installs its hook at step
+  6000 (IVT 2Fh -> 0x1000:0x0E0C), re-hooks to 0x125E:0x05FE at 10000, and
+  DOSX's glue replaces it with 0x1861:0x097B at 44000 (image+0x2C9F:
+  `mov dx,0x97B; mov ax,0x252F; int 21h`). The AX=1605 install broadcast
+  fires (image+0x36, dx=1 di=0x30A) and returns CX=0, so the loader takes
+  the jcxz path — normal for a clean DOS box. The AX=1687 DPMI check
+  (KRNL286 image C8E7, PM 02EF:B4D0) is ANSWERED (ax==0, the DPMI entry
+  lcall at B50A runs, vendor API AX=168A at B584 with bx=0x19AC). Nothing
+  is wrong with the hook chain.
+- **The image+0x11E0 phase-2 block (INT 2Fh AX=1607h BX=0x14 -> 0x40-word
+  table copy -> call 0xa60 -> ljmp 0x53:0x3BD6) NEVER RUNS — and that is
+  correct.** There are two sibling switch blocks: image+0x11B0 (NetBIOS
+  INT 5Ch variant -> ljmp 0x53:0x3B07) and image+0x11E2 (1607/14 variant ->
+  ljmp 0x53:0x3BD6). The first-stage PM code (the 0x4330-byte copy at
+  EMB+0x920) holds pointers to them at PM offsets 0x3B03/0x3BD2 — they are
+  overlay-chain blocks CALLED BY the EMB-based PM code to load the next
+  stage, not part of phase 1. Also verified: INT 68h (the 0xF386
+  386-to-the-max host, gated by the [0x2f10] flag at resident+0x2F10) is
+  never hooked in a vanilla DOS 5+HIMEM boot — our skip path matches real
+  hardware; INT 68h is not the protection either.
+- **The geometric paradox is now PROVEN.** keep_end = image_start + 0x13A0
+  bytes (the glue's 0x13A constant, file-verified) — invariant in every
+  base variable. KRNL286's PSP = first-fit after the shrink = keep_end+1
+  (0x199C), and its pool base = PSP+0x20 (KRNL286 itself converts segments
+  0x19AC/0x19BC = PSP+0x10/+0x20 via DPMI AX=0002 at 02EF:27A3, and the
+  pool selector 0x277 is built for segment 0x19BC by the DOSX 0053 selector
+  services, retro-captured at the 13BBF call site PM 02EF:B56D — ax=0x277,
+  bx=0x19BC). Therefore the pool starts at image_start+0x15B0 bytes —
+  ALWAYS inside the 0x35EC-byte image. On real hardware the same guest math
+  forces the same collision, so one of the flow inputs must differ.
+- **The strongest lead: the R10-era boots ran KRNL286 at PSP 0x1426 —
+  DOSX's OWN PSP — while our boot EXECs KRNL286.EXE as a child (psp 0x199C,
+  EXECW step 112000).** With KRNL286 at PSP 0x1426 the pool base
+  (PSP+0x20 = 0x1446) lands in the KEPT DGROUP area and nothing collides.
+  Either the real glue load path differs (module-style load into DOSX's
+  own block vs our AH=4B child EXEC), or the R10-era `KRNL286 PSP 0x1426`
+  note reflected a core that didn't repoint machine.pspSeg on that EXEC.
+  No AH=48 fires after step 18000 in our boot (the FN[0x48] wrapper sees
+  all of them), so nothing reserves the straddle.
+- Probe additions: `--trace-1607` (INT1600/INT1607 sites + IVT2F write
+  tracer + L2F all-INT-2Fh log with nil-safe step hook — the hook must
+  guard `self.r`/`self.es` because the first step-0 invocation has sparse
+  fields, and `bx` in a new inner block resolves to a nil global if not
+  re-declared), `--trace-68` (TAIL68 loader-tail tracer: at 44000 the tail
+  runs 35BD..35CC then the ring-0 gate call lcall 0xCB,0 does NOT return —
+  the boot continues inside the supervisor; the 164000 tail samples are the
+  slide walking through it), `--trace-alloc` (the 13BBF pool-base call at
+  PM 02EF:B56D with retro).
+
+**R12 part 3 second pass (2026-11-13): case 1 (MCB corruption) is DEAD —
+the shrink is applied correctly; the EXEC is AL=00 (a real child), and the
+162000 stub entry does NOT come from the INT22 resume.** Guest-visible MCB
+walk at the KRNL286 EXEC (probe `--trace-kexec`, walk head = LoL first-MCB
+0x0050, next = mcb+size+1):
+`0050:4D ow=0008 sz=07AF | 0800:4D ow=0008 sz=0064 | 0865:4D ow=10F0 sz=0040 |
+08A6:4D ow=1426 sz=0040 | 08E7:4D ow=0000 sz=06D7 | 0FBF:4D ow=0008 sz=003F |
+0FFF:4D ow=0008 sz=00EF | 10EF:4D ow=10F0 sz=0335 | 1425:4D ow=1426 sz=0575 |
+199B:5A ow=0000 sz=8664` — the DOSX block is exactly 0x575 paras
+(0x1426..0x199B), the image tail (0x199C..0x1BD5) sits in the FREE block, no
+carve-into-owned, chain coherent to 0xA000. The EXEC is AL=00 (param block
+env=0000/inherited, cmd=1436:1EFC, FCBs 1436:1F9C/1FCC, tail = one space) —
+not mode 3.
+**The INT22 trail is also clean**: our buildPSP sets every PSP's INT22 to
+`0000:<own PSP>` (the INT 20h at PSP:0000 convention — core/Executables.lua
+buildPSP lines `write16(base+0x0A, 0)` / `write16(base+0x0C, pspSeg)`), and
+the INT22W watcher saw no PSP INT22 ever rewritten to 0x5B:0x000A (the only
+0x199CA/0x199CC writes are the 44000 copy and the 14000 fill — false
+positives: those addresses are image bytes before the KRNL286 PSP exists).
+So the 162000 stub entry (0x5B:0x000A) came from the 0C9B glue's OWN
+published PM-entry target — the DOSX stub IS the published re-entry (its
+`mov ax,0x1436; ... call +0x2956` runs `or ax,ax` on the QEMM probe result
+every time), and the probe at image+0x2971 is clobbered at that point.
+
+**R12 part 3 third pass (2026-11-13): the elimination sweep is complete —
+all three candidates falsified, two new structural facts.**
+
+- **(c) FALSIFIED**: no re-copy. The post-128000 image-region writes
+  (`--trace-9b` RECOP) are exclusively KRNL286's own pool sub-arena header
+  at linear 0x19BC0 (`4D`, owner 1, size 0xFFFF, next 0x277 — written by
+  02EF:B18B..B1A1). No staging read/copy rebuilds the resident tail; IMGMAP
+  at fault still ends at +0x175C.
+- **(a) DEAD**: the R10-era `KRNL286 PSP 0x1426` is a mislabel — the
+  R10-era arena (`1426+1CAF:1426 30D6+1000:8`) shows the DOSX block unshrunk
+  and **no KRNL286 child block**: the R10-era boots died at the 162k
+  terminate and never EXEC'd KRNL286.EXE. The 0x1426 value was the
+  DOSX-phase current pspSeg. The KRNL286 EXEC is new in the post-R11 flow,
+  so the R10-era evidence says nothing about KRNL286's real placement.
+  Also dead: "cs53 got further" — the R10-era boots died at the same
+  terminate; cs=0x53 (EMB, 0x3EB920) runs in OUR boots too as the DPMI/
+  selector service host (retro at the 13BBF call: 0053:2146-21CA).
+- **(b) REFUTED**: KRNL286 reads PSP:02h through the DPMI mode-switch ES
+  (image C94D `mov di,es:[2]`), but the derived selector (0x3CF, limit
+  0xEFAF) is INVARIANT across PSP:02 = 0x2B0B/0x2B0C/0x2B10/0x2B20 (probe
+  sweep with a consistent arena shrink: block 0x116F paras, free from
+  PSP:02). The PSP:02 patch REGRESSES the boot (168k -> 152k, a new failure
+  mode) — do not pursue EXEC resizing for this.
+- **NEW structural fact 1**: KRNL286's RM phase builds its own PSP at
+  segment 0x0C9B (linear 0xC9B0, inside the freed low region 0x9280..0xFBF0)
+  at step 154000, and its PSP INT22 is pointed at the DOSX stub (0x5B:0x000A)
+  — the published re-entry. The R11-era "wild-return" (cs 0x0C9B:0x3650 ->
+  linear 0x10000 = that era's child PSP:0000) was a wrong-segment slide that
+  landed there, not a deliberate jump; the R11-era dump_r11_rmglue.bin is
+  actually that era's child env+PSP, not glue code.
+- **NEW structural fact 2**: the "segment 0x19BC" DPMI AX=0002 conversion is
+  the pool's OWN sub-arena MCB paragraph (linear 0x19BC0) inside KRNL286's
+  EXEC block — KRNL286 sub-allocates its own block with a private MCB chain
+  (owner 1, size 0xFFFF, next 0x277) and maps pool pieces through it. The
+  pool collision is invariant to the EXEC block sizing.
+
+**R12 part 3 fourth pass (2026-11-13): the added check + the trampoline
+mechanism fully decoded — the crash is a stale DGROUP stack slot, and the
+EMB dispatch already happens.**
+
+- **Added check answered: the pool limit 0x408F is guest-constant.** The
+  pool-init (image C46C..C4EA) computes the size from `mov ax,0x4000` plus
+  fixed 0x72/0x2F header allowances: cx = (0x72+0x4000+0x2F)&0xFFE0 = 0x40A0,
+  paras = 0x40A>>4 - 1 = **0x409**, limit = 0x408F, zero = 0x4090 bytes.
+  No emulation value feeds it: on real HW (INT 2Fh 1600 → AL==3) [0x324] bit
+  0x20 is SET so the LSL path is skipped → 0x4000; in our boot (AL≠3) bit
+  0x20 is clear but cs:[0x32]==0 → also 0x4000. The only divergent path
+  ((limit+1)/2 via cs:[0x32]) can't trigger at pool-init time in either
+  environment. The 16KB pool at image_start+0x15B0 is invariant.
+- **The second re-entry's real chain (retro ring at the stub entry,
+  probeAI/probeU)**: the PM supervisor at 0078:0B16-0B50 (GDT[0x78] =
+  resident image) → `push 0x4B; push ax(sp=0xF0); pushf|0x3000; push 0x5B;
+  push 0xB51; iret` → the trampoline 0x5B:0B51 (`cmp [0x134],3; jb 0xB60`)
+  → **`ret` pops the return address from SS:SP = 0x4B:0xF0** — the IRET is a
+  privilege-change IRET (pops ip/cs/flags/**sp/ss** — the five pushed words
+  are correct 286 semantics). The popped value at the 162000 pass =
+  **0x0000** → cs stays 0x5B → lands on the image header (0x5B:0000 = the
+  0x1436/0x05FE/0x125E words executed as code — slide-start #1) → walks to
+  the stub at 0x000A → the stub runs (ax=0x1436, ds=ss=0x1436, sp=0x100) →
+  `call +0x2956` → 0x2971 clobbered → slide-start #2 → the fault.
+- **The trampoline pass history (probe `--trace-ret`, TRAMP lines)**:
+  44000 ×2 (sp=0xF8/0xFE, targets 0x3579 = the loader's gate-return and
+  0x0077 — the loader phase-1 works), 108000/110000 (sp=0x4276, target
+  0x07ED — the KRNL286-era PM callback returns), 112000 ×2 (sp=0xFE →
+  0x00D8 = the glue's ljmp 0x53:0x00BF; **sp=0xE8 → 0x11DD = the 0x11B0
+  overlay-switch block's `ljmp 0x53:0x3B07` — the EMB dispatch DID happen
+  in our boot, via the 0x11B0 NetBIOS-variant block**), 162000 (sp=0xFE0 →
+  0x0000 → the header). Each trampoline ret pops whatever the 0x4B stack
+  holds at the SP the supervisor's IRET frame supplied.
+- **The 162000 pass's stack slot (0x4B:0xFE0 = linear 0x15340) holds the
+  decompressed DGROUP's initial zero** — no pass ever wrote a return address
+  there; the supervisor's IRET frame supplied SP=0xFE0, pointing at a slot
+  nobody initialized. On real hardware the same guest code reads the same
+  slot — so either the real supervisor's frame supplies a different SP
+  (the 0x68-stack's SP at 0B40 is set by whoever entered the supervisor),
+  or the slot is initialized by code that our flow never executed
+  (candidates: the clobbered region's PM code 0x2971..0x35EC, or the
+  loader's phase-2 state that depends on the INT 2Fh 1607/5Ch environment).
+- Probe additions: `--trace-ret` (TRAMP trampoline passes with raw stack
+  dumps + SLOT writer watch on 0x14440..0x14470). The earlier runs' lesson:
+  the step hook must guard the sparse first invocation (`self.r`/`self.es`),
+  inner blocks must re-declare locals (`bx` resolves to a nil global), and
+  formatted stack strings must not be re-fed to `%04X`.
+
+**R12 part 3 fifth pass (2026-11-13): the crash slot is NOT the DGROUP slot
+I was watching — it is 0x27F:0xFE0 = linear 0x2B510, on the KRNL286-era
+stack selector 0x27F whose base is 0x2A530 (INSIDE the freed region), and
+the supervisor's IRET frame words for sp/ss (0xFE0/0x27F) do not match the
+values the supervisor pushed (0xF0/0x4B) — the frame is modified between
+push and IRET, or the pops shift.**
+
+- **Slot provenance corrected**: the earlier SLOT watch watched linear
+  0x14440..0x14470 (from the misread sp=0xF0) — the true crash slot is
+  0x27F:0xFE0 = linear 0x2A530+0xFE0 = **0x2B510**, on the KRNL286-era stack
+  (the 0x27F LDT selector, base 0x2A530, allocated in the freed region).
+  TRAMP 162000: `ret-at ss=027F base=2A530 sp=0FE0 stack=[0000 0407 A1C4
+  0407 0001 0427 00FF A410] target=0000:005B` — the popped 0x0000 → cs stays
+  0x5B → the image header → the stub → the clobbered 0x2971. The slot's
+  provenance (who wrote linear 0x2B510) is the next probe target.
+- **Supervisor entry at 162000** (`SUP78`): `0078:0B0E ax=0001 ss=1436
+  sp=00F0` — the supervisor is entered with **RM-residue segment values**
+  (ss=0x1436 = the DGROUP segment value used as a PM selector!) — the lmsw
+  transition preserves RM segment values and the PM descriptors for those
+  selector values must exist. At the 42000 first entry the same block was
+  entered with ss=0x1436 sp=0x00F8 (loader phase 1).
+- **IRET frame discrepancy**: the supervisor pushes (in order) sp-word
+  0x4B?? no — `mov ax,sp` (=0xF0) / `push 0x4B` / `push ax` / `pushf` /
+  `pop ax; or ah,0x30` / `push ax` / `push 0x5B` / `push 0xB51` / `iret` —
+  the frame at 0x68:0xE2.. = ip=0xB51, cs=0x5B, flags, sp=0xF0, ss=0x4B.
+  But the trampoline's observed SS:SP = 0x27F:0xFE0. Either the frame words
+  at 0x68:0xEC/0xEE were overwritten between the pushes and the IRET (PM
+  interrupt? another writer?), or the IRET pops shifted, or our CPU's
+  privilege-change IRET semantics differ from the guest's expectation. This
+  discrepancy IS the crash mechanism: the trampoline's ret pops from
+  whichever SS:SP the IRET produced, and the produced slot (0x2B510) holds
+  a stale zero instead of a return address.
+- Probe fixes: the SLOT watch now covers 0x15340..0x15350 (the DGROUP slot
+  — still never written after the decompression fills, confirming no
+  DGROUP-side initializer ran) and SUP78/TRAMP are gated to steps>=150000
+  with raised caps (the earlier caps silently ate the 162000 data).
+
+**R12 part 3 SOLVED (2026-11-13, commits machine:/dosx:): the crash's root
+cause was OUR CPU — the IRET's pmSaved PM↔RM branch had no PE gate, so the
+supervisor's PM→PM IRET (0x78→0x5B, both low selectors) wrongly restored the
+stale pmSaved snapshot (ss=0x27F sp=0xFE0, the KRNL286-era stack) instead of
+popping its own frame's SS:SP (0x4B:0xF0).** Fix: gate the branch on
+`band(cpu.cr0, 1) == 0` in core/Cpu.lua H[0xCF] — the branch is for genuine
+RM→PM returns, which run with PE=0. With the gate, the trampoline pops the
+intended slot (0x4B:0xF0 = 0x0E53) and returns into the loader at
+0x5B:0x0E53. The boot then hits the NEXT frontier: **INT 21h AH=4D (get
+child's return code) was unimplemented** — implemented in core/Dos.lua
+(FN[0x4D]: AL=00 normal, AH=lastChildCode; Machine.dosTerminate now records
+`lastChildCode = code` for every terminate path). Result: **the boot passes
+168k and runs 1.2M steps with no fault** — DOSX, KRNL286 EXEC'd, the PM
+phase running. The R12 slide frontier is gone.
+
+**R12 part 4 first pass (2026-11-13): the new frontier found — WIN.COM's RM
+callback dispatcher spins forever on an UNKNOWN callback AX=0x4B00.**
+
+- 4M steps run clean (no fault, no slide), but the boot spends 1.2M..4M in
+  one place: WIN.COM's RM callback dispatcher at 1000:0D2C (WIN.COM's PSP is
+  0x1000, image at linear 0x10100, file offset 0xD2C) — a table scan:
+  `lea bp,[0xDF0]; cmp [bp],ax; je match; add bp,4; jmp back`, dispatching
+  RM callbacks by AX id to handlers via `add bp,2; jmp word [bp]`.
+- **The table (WIN.COM file 0xCF0)** has six entries — ids **4A05, 4B03,
+  4B04, 4B05, 4B06, 160A** — plus a terminator id=0000 (handler 0x0E3E, the
+  "no match" chain via `ljmp cs:[0xd4b]`). **No bounds check**: an unknown
+  nonzero AX walks past the terminator into code bytes treated as table
+  entries and spins forever (observed: 434+ entries walked at
+  ds=0x125E:[bp=0x6C8] — the KRNL286-era copy of the dispatcher at segment
+  0x125E; cs=0x1000/0x125E both observed).
+- **The unknown callback is AX=0x4B00 — the DOS EXEC function id.** KRNL286's
+  PM phase is requesting a program load through WIN.COM's RM callback
+  protocol, and WIN.COM's table has no 4B00 entry. The scan's `push cs;
+  pop ds` shows the table lives in the callback's own segment (cs=0x125E
+  observed — a KRNL286-era copy of the dispatcher; the DGROUP-resident copy
+  at cs=0x1000 also seen).
+- Probe additions: `--trace-scan` (SCAN lines at 1000:0D2C-0D35 with
+  ax/bp/ds/[bp]) and the DUMP_DESC selector list now includes 0x125E/0x0427.
+
+**R12 part 4 second pass (2026-11-13): the INT 21h provenance traced — the
+spin is NOT a misrouted INT 21h; it is a PM→RM callback dispatched into
+WIN.COM's callback table.**
+
+- **INT 21h vector provenance** (`--trace-v21`, V21W lines): the DOSX-side
+  hook (segment 0x125E, handler 0x05CC) is installed at step 10000
+  (`int 21h AH=25 AL=21` at 125E:093A → IVT 21h = 0x125E:0x05CC) and
+  RE-HOOKED by the DOSX glue (1861:0924) at 162000 (same vector). But the
+  spinning scan's own INT 21h vector is **0x0024:0xF100 — our core's default
+  stub** (SCANV21 lines). So the EXEC request was never misrouted through
+  WIN.COM's INT 21h hook: the scan is not an INT 21h handler at all.
+- **The spin is a PM→RM callback dispatched into WIN.COM's callback table.**
+  KRNL286's PM phase requests a program load (AX=0x4B00, the DOS EXEC id)
+  via its RM callback protocol, and the callback lands in WIN.COM's
+  dispatcher (cs=0x1000/0x125E copies), whose table lacks 4B00. The
+  unbounded scan then walks past the terminator into code bytes.
+- The dosx-side INT 21h hook (0x125E:0x05CC) exists from step 10000 but is
+  not involved: the KRNL286-phase DOS calls that reach our core's FN[0x48]
+  wrapper are separate. The callback dispatch table (which PM→RM callback
+  target handles which AX) is the thing our emulation populated or the
+  guest registered via DPMI real-mode callbacks (AX=0303) during WIN.COM's
+  phase.
+
+**R12 part 4 third pass (2026-11-13): no DPMI callback registrations exist —
+the DOSX callback protocol is its own.** A full-boot watch (probe
+`--trace-cb`, 1.5M steps) for INT 31h AX=0303/0304 (DPMI Allocate/Free
+Real-Mode Callback) found ZERO calls — DOSX's RM callback protocol is not
+DPMI-based. The candidate registration mechanism is the **INT 68h 0x50xx
+service family** (0x5000 reserve / 0x5040 dispatch / 0x5041 with
+di=DGROUP+0x2F11 observed at image 2C4A-2C57) — DOSX's private RM-service
+interrupt that our boot leaves unhooked (no INT 68h host on vanilla
+DOS 5+HIMEM).
+
+Also: the WIN.COM dispatcher entries do NOT happen at cs=0x1000 ip=0x0D19
+(zero hits at 1.5M with a dedicated watch) — **the callbacks enter the
+0x125E copy of the dispatcher** (the KRNL286-era segment; the scan's
+ds=0x125E matches). The next probe must watch cs=0x125E ip=0x0D19-0x0D35
+for the dispatcher entries and the callback caller.
+
+**R12 part 4 fourth pass (2026-11-13): the 4B00 callback is TRANSIENT —
+the 1.2M-4M stall is a DIFFERENT loop.** The CB4B00 tracker (`--trace-68h`)
+shows the 4B00 callback at step 10000 (during WIN.COM phase 1, right after
+the WSWAP EXEC): it enters the scan loop at 1000:0D34, walks a few entries,
+finds a FALSE match in garbage memory (some address containing 0x4B00),
+exits via the handler-jump, and the boot CONTINUES (no fault at 400k). The
+caller is at 0EB6:0E7F (from the ret on the stack). The 1.2M-4M "stall" is
+at cs=0x125E (an LDT selector, KRNL286's PM phase) offset 0x61C-0x6E9 — a
+completely different loop, NOT the callback scan. The LDT descriptor for
+0x125E is zero at 400k/1.5M (the LDT is re-created mid-run), so the code
+must be dumped via --dump-cs or the descriptor captured at the right
+moment.
+
+**R12 part 4 fifth pass (2026-11-13): the 1.2M-4M "stall" decoded — it is
+WIN.COM's RM callback poll loop, and the poll always returns "nothing to
+do" because the event flags (cs:[0x18C] & 0x3F in segment 0x125E) are never
+set.**
+
+The code at cs=0x125E offset 0x067C-0x06EF (from the STALLCODE dump at
+linear 0x125E0+0x65F = 0x12C3F — WIN.COM's block, NOT the DOSX image):
+- 0x67C: `push ax; mov al,1; xchg byte cs:[0x193],al` — set busy flag
+- 0x687: `je 0x68C` — if not busy, continue
+- 0x68C: `test byte cs:[0x18C], 0x3F` — check 6 event-flag bits
+- 0x694: `jmp 0x6E9` — if clear: clear busy and ret (nothing to do)
+- 0x697-0x6E7: the callback dispatch body (saves ss/sp, calls 0x9A7/0x6F0,
+  restores ss/sp — the actual RM callback processing)
+- 0x6E9: `mov byte cs:[0x193], 0` — clear busy, ret
+
+At step 1300000 the state is: `cs=0x125E ip=0x067F ax=0x5001 bx=0x1426
+ds=0x1436 ss=0x1436 sp=0xF6` — the caller's ax=0x5001 (a service id!),
+bx=0x1426 (the DOSX PSP segment). The RM callback poll returns "nothing to
+do" because cs:[0x18C] & 0x3F == 0 — no RM callback events pending.
+
+**No code in the DOSX image writes cs:[0x18C]** — the event flags live in
+WIN.COM's copy of the callback data (segment 0x125E = linear 0x125E0,
+offset 0x18C = linear 0x1276C, inside WIN.COM's block 0x10EF..0x1424). The
+bits should be set by whatever processes the RM callbacks (the WIN.COM
+second-stage code that KRNL286 calls into). In our boot the PM phase calls
+the RM poll repeatedly but no events ever fire because the PM→RM callback
+protocol (which would set the event bits on completion) was never
+established — the AX=0x4B00 EXEC callback at step 10000 was transient (it
+walked past the table into garbage and the boot continued), and the DPMI
+callback registrations don't exist.
+
+**R12 part 4 sixth pass (2026-11-13): the INT 21h vector conflict RESOLVED —
+our core never touches it; the hook stays installed.** A full-boot
+post-write IVT provenance (`--trace-v21f`, V21F lines, 4M steps) captured
+exactly TWO write events to IVT 21h (linear 0x84-0x87):
+
+1. Step 10000: 125E:093A (`int 21h AH=25 AL=21`) → vector = **0x125E:0x05CC**
+2. Step 162000: 1861:0924 (the glue re-hook) → same vector 0x125E:0x05CC
+
+The vector NEVER reverts to our core's default stub (0024:F100). The
+pass-10 SCANV21 reading of `ivt21=0024:F100` was a timing artifact (the
+read happened before the hook install within the same step-slice). The
+0x125E segment maps to linear 0x125E0 — WIN.COM's block (0x10EF..
+0x1424), NOT the DOSX image (0x29420). So the INT 21h hook at 0x125E:
+0x05CC is WIN.COM's own INT 21h handler, and the event flags at cs:0x18C =
+linear 0x1276C are also WIN.COM's data. The RM callback poll at cs=0x125E:
+0x067C checks WIN.COM's own event bits. The handler at 0x05CC should set
+those bits when DOS calls complete.
+
+**R12 part 4 seventh pass (2026-11-16): the "stall" is a terminate loop, not a
+KRNL286 poll.** Live disassembly of WIN.COM's resident block (segment 0x125E,
+dumped with the probe's new `--dump-lin <hex> --dump-len <n>` flags) shows
+0x125E:0x05FE is the INT **2Fh** handler (AX=4680 present check, 1605/1606
+Windows init/exit broadcast, 4B02, 4B80), not INT 21h. The only setter of the
+event byte cs:[0x18C] is `mov byte cs:[18C],4` on **INT 2Fh AX=4B80**; the
+other writes (0x5C1, 0x922, 0x9E5) clear it. A new `--tally-2f 1` probe flag
+tallies software INT 2Fh and INT 21h AH=4B..4D calls with their callers over
+4M steps: AX=4B80 is **never issued**, but WIN.COM's second stage exit path at
+1861:0215 is reached at ~step 162000 and then repeats **23,684 times**:
+`INT 2F AX=1606 DX=1` -> `INT 21 AX=4D..` -> `INT 21 AX=4CFF`. The last
+EXEC (INT 21 AX=4B00 from 1861:00EF at step 112000) is the child WIN.COM waits
+on; it returns, WIN.COM reports exit code 0xFF and calls AH=4C, and our DOS
+terminate hands control back to the same exit sequence instead of ending the
+root process. So (a) the child (DOSX/KRNL286) is terminating with AL=FFh at
+~162k steps, and (b) the 1.2M-4M "poll at 125E:067C" window is the aftermath of
+that, which reframes passes 1-6. Next: find why the child exits 0xFF (check the
+`mov byte cs:[16d],0xFF` error-flag site at 125E:05F3 and DOSX's own exit
+paths), and make AH=4C of the root process stop the machine instead of
+re-entering.
+
+**R13 (2026-11-17): MS-DOS Prompt works in the shipped real-mode 3.0a build; Control Panel Color verified; group captions fixed.**
+- The twelfth-pass MS-DOS Prompt limitation below is about the Win 3.1 *standard-mode* probe tree (WSWAP/DSWAP swapping) and is
+  still open there. The shipped build is Windows 3.0a real mode, where "DOS Prompt" is `command.com` run by KERNEL/WINOLDAP
+  through a plain INT 21h AH=4B, and it needed only four things:
+  - a COMMAND.COM: `fixtures/Command.lua` is a hand-assembled 254-byte stand-in (banner, `C:\>`, `exit` any case, otherwise
+    "Bad command or file name"), written to `C:\WINDOWS\COMMAND.COM` by `Install.seed` and by `Emulator.client.lua`;
+  - `Dos.kernelPsp`: once `KERNEL.EXE` has been EXECed every later EXEC gets a caller frame, so the child's AH=4C returns to
+    WINOLDAP instead of ending the machine (guest then restores 640x480 graphics by itself);
+  - `Machine.bridgeDosKey`: scan codes (all that Windows / the Studio client deliver) are also translated to ASCII into
+    `machine.keys` while an EXEC child owns the console, because the DOS layer and INT 16h read ASCII;
+  - the 286 grabber `VGACOLOR.GR2` in the Studio fixtures (`pack_winboot.lua`), else "Cannot find the grabber".
+  Verified in Studio: Enter on the DOS Prompt icon shows the text session, typed `dir` answers "Bad command", `exit` returns
+  to Program Manager. Tests: `standin_command_com_prompts_and_exits`,
+  `scan_codes_reach_dos_keyboard_buffer_only_while_a_dos_child_runs`. `tools/probe_dosbox.lua` is the fast repro (5M steps).
+- Control Panel Color: the combo is fine in the shipped build ("Windows Default"; staged CONTROL.INI carries `[color schemes]`).
+  The empty combo seen earlier came from the 3.1 probe tree, which has no CONTROL.INI.
+- Program Manager captions: our generated group files used an 80px item pitch; now 110px (`ITEM_STEP_X`), windows widened, and
+  WIN.INI gets `[Desktop] IconSpacing=110` (`Install.setIniKeyText`), so "Control Panel"/"Print Manager"/"Windows Setup" are whole.
+
+**R15 follow-up (2026-11-23): swap-in resume fixed.** Chose option (c): `Dos` copies the KRNL286 block when EXEC hands DSWAP the
+reclaimed memory (`savedKernel`) and puts it back when the swap-in WSWAP deletes its swap file (its last INT 21h before
+entering the resumed DOSX; WSWAP never ends with AH=4C). Probe run (`--steps 22000000`) no longer faults at 14.534M, the VGA is
+back in mode 12h with content. Test `dos_swap_in_restores_the_kernel_block_dswap_was_handed`. Not yet verified: a full
+Program Manager repaint after the resume (only checked mode and non-zero VGA bytes).
+
+**R15 (2026-11-17): Win 3.1 standard-mode MS-DOS Prompt now launches, runs and exits; the swap-in resume faults.**
+Disassembled DSWAP.EXE/WSWAP.EXE with capstone (image offset = file offset - 0x200; DSWAP code segment at image 0x9D0, helper
+segment 0x1DA0). Root causes, all fixed with tests:
+- DSWAP's only `error=3` store (image 0x5AA1) is a memory check (image 0x5A6C): the DOS app's required KB (task block
+  `[es:si+0x1F]`, `[9]`) must fit in DSWAP's own block (`[0x44]` = its MCB size) minus DSWAP's resident size. WIN.COM reads
+  error 3 as "DOS app failed" and swaps Windows straight back in. Our EXEC gave non-NE EXEs only min+0x1000 paragraphs even
+  though DSWAP's header says maxalloc FFFF. `Dos.FN[0x4B]` now frees the ended DOSX/KRNL286 session and gives DSWAP every free
+  paragraph (test `dos_exec_dswap_takes_all_free_memory_after_reclaiming_the_session`). DSWAP also gets an EXEC return frame.
+- `Dos.FN[0x4A]` grow over a whole free neighbour (spare = -1) dropped the neighbour from the arena without growing the
+  block: DSWAP shrinks to 0x8D3, runs the DOS app, then grows back to 0x8F10 and lost ~140 KB, so WSWAP could not load
+  (`EXEC failed: no 13EB paragraphs`, "Fatal exit! Windows cannot be swapped back"). Test
+  `dos_4a_grow_over_the_whole_free_neighbour_keeps_its_paragraphs`.
+Result (`media/win31/probe31.lua --dosbox 2 --run command.com --key-at 14500000 --script "type:exit enter w4000000"`): the
+stand-in prompt shows the WINOLDAP banner and `C:\>`, typing `exit` returns, WSWAP#2 (swap-in) loads and runs.
+- New frontier (~14.534M steps): after the swap-in DOSX PM code returns through a zero selector
+  (`#GP: cannot load null selector into cs`, lastPC 005B:0BE2, stack ss=14AF sp=27C4 -> base 0x67430). Memory diff
+  against a snapshot taken at the DSWAP EXEC (`--diff-mem 1`, local probe flag): WSWAP#1 only saves ~56 KB, which is DOSX's
+  own block (`1426+575`, pages 0x11-0x19 are restored). The kernel block `199C+8664` (pages 0x24-0x9F, our stand-in for
+  KRNL286's extended-memory footprint, see the boundNE EXEC note) is NOT saved, but DSWAP now owns it and overwrites it, so
+  the resumed kernel finds its stack/heap clobbered. Real DSWAP never sees that memory because real KRNL286 keeps it in
+  extended memory. Options: (a) keep the KRNL286 block out of DSWAP's allocation and make the DOS app fit the ~41 KB left by
+  giving COMMAND a small PIF memory requirement; (b) back the kernel block with extended memory so DOS cannot hand it out;
+  (c) make our WSWAP path save it. (a) is the cheapest: find the PIF fields WINOLDAP copies to `[es:si+0x1F]`.
+- Local research flags added to `probe31.lua` (media/ is git-ignored): `--log-21 STEP` (every INT 21h with results and
+  paths), `--log-arena 1` (block map after 4A/4B/4C/48/49), `--diff-mem 1`, `--dosbox 2` (seeds the shipped
+  `fixtures/Command` stand-in instead of the 32-byte one).
+
+**R14 (2026-11-17): Win 3.1 standard-mode swap path decoded further; swap drive was A: (inverted IOCTL), DSWAP still ends with error 3.**
+Status note: the premise "standard mode never reaches a desktop" is stale - the ninth pass reaches Program Manager (~38M steps)
+and the probe still loads PROGMAN/USER/drivers by 41-42.6M. The open work is only the MS-DOS Prompt swap path. REA was not
+usable (Ghidra unconfigured, and the Windows Ghidra provider rejects DOS MZ), so WSWAP/DSWAP/WIN.COM were disassembled with
+capstone and traced with new local probe flags (`--log-2fall STEP` all INT 2Fh with ES:DI bytes; `--dos-after` now dumps the
+WIN.COM interface block at 1000:06C8+16C on AH=4C/4D and the swap-path strings on AH=36).
+- Fixed (tests `dos_4408_floppies_removable_c_fixed`, `dos_36_floppy_drives_report_invalid`): INT 21h AH=44 AL=08 returned
+  fixed for A:/B: and removable for C: (inverted), so WSWAP picked A: as the swap drive (`A:\WINDOWS\~WOA*`, `A:\~WOA100F.TMP`);
+  AH=36 now answers AX=FFFF for A:/B:. Swap file now `C:\~WOA100F.TMP`. The old MachineTests check encoded the inversion.
+- Proven flow at ~42.52M: kernel issues INT 2F AX=4B80 (sets WIN.COM event byte cs:[18C]) and 4B01 chain builds; WSWAP#1
+  (psp 100F) reads program name "COMMAND" from 1000:0B2B, writes the swap file (~56 KB of blocks, headers 0x10/0x8 byte
+  descriptors), AH=4C AL=0, status word [06C8+171]=0000. WIN.COM then EXECs DSWAP ('d' chosen because task flag 0x2000 is
+  clear), DSWAP does only attrib+delete of `~WOA100D.TMP`, ends AH=4C AL=0 but leaves **[06C8+171]=0x0300 (error AH=3)**, so
+  WIN.COM treats the DOS app as failed, EXECs WSWAP#2 (swap in) and restarts Windows -> GPF at KRNL286 0001:713E.
+- Not the cause (disproved): path-not-found on `A:\WINDOWS` (path now exists, error 3 persists). WSWAP/DSWAP are one state
+  machine (`lcall [0x1a2]` handler at [0x61]=0x7b4/overlay), DSWAP error byte is `[0x24]`. Next: trace DSWAP from entry (12DA) to
+  find which state returns AH=3 (candidate: the [06C8+16D]=0x100F owner/psp check at DSWAP 0xD09 vs its own psp 0x100D, or an
+  INT 2F 4A05 SI=3/5 reply our core leaves as AX unchanged), then make that answer match WIN.COM's 4A05/4B hook.
+
+**R12 part 4 twelfth pass, final state of the MS-DOS Prompt work (standard mode) and the other follow-ups.**
+Findings (probe flags `--log-exec`, `--log-term`, `--ring-first-pc SEG:OFF` are local): WIN.COM (PSP 1000) EXECs
+WSWAP.EXE (PSP 10F0), which EXECs DOSX.EXE (1426), which EXECs KRNL286.EXE (199C): the whole Windows session runs inside nested
+EXECs. When Windows exits for a DOS app, DOSX returns to WIN.COM main (`1000:01BC`) with NO AH=4C for 1426/199C, so their
+blocks stayed owned. WIN.COM's exit/DOS-app loop is `wswap.exe` (swap out, psp 4336) -> `dswap.exe` -> `wswap.exe` (swap
+in) -> message "Fatal exit! Windows cannot be swapped back" -> AH=4C. Fixes (tests in DosTests):
+- `Dos.sessionPsps`: EXEC of `DOSX.EXE`/`KRNL286.EXE` is remembered; when a later EXEC cannot get memory, blocks owned by those
+  PSPs are freed and the EXEC retried (`dos_exec_reclaims_ended_dosx_session_blocks`). DSWAP/WSWAP now load.
+- INT 21h AH=40 after a seek past EOF now zero-fills the gap (it used to drop it, shifting data): WSWAP's swap file header
+  was read back wrong (`dos_write_after_seek_past_eof_zero_fills`). With it WSWAP#2 succeeds, WIN.COM no longer exits, and
+  Windows restarts to a 640x480 graphics screen.
+- Current blocker: after that restart the screen shows "WINOLDAP caused a General Protection Fault in module KRNL286.EXE at
+  0001:713E" and the DOS app (our stand-in COMMAND.COM) never runs: DSWAP is started with an empty tail and only does
+  attrib/delete on `A:\WINDOWS\~WOA100D.TMP`; no COMMAND.COM open is ever seen. Real WSWAP/DSWAP swap the Windows image
+  (XMS/extended memory plus the conventional MCB chain) to the swap file and run the DOS app in between; here WSWAP writes only
+  ~48 KB and the freed kernel blocks are reused by DSWAP/WSWAP loads, so the resumed kernel is corrupt. To finish: dump what
+  the ~WOA file contains (it carries the app command line), make WSWAP/DSWAP see the DOS app request, and make the
+  "freed" Windows memory survive (do not hand 1426/199C ranges out until swap-in, or really implement the swap data path).
+- File Manager: double-clicking a tree folder is slow, not stuck: the `C:\WINDOWS\SYSTEM` listing (467 files) appears after
+  ~8M steps. Paintbrush line and box tools and the Control Panel Color applet were exercised by mouse and work (Color dialog
+  opens; its scheme combo text draws empty).
+
+**KNOWN LIMITATION (twelfth pass, time-boxed follow-up): MS-DOS Prompt does not start in standard mode.**
+Probe flag `--log-term 1` (local) logs every AH=4C / `dosTerminate`: in a whole `command.com` run there is exactly ONE
+AH=4C, WSWAP's own (`1133:0111`, curpsp 4336). The DOSX (PSP 1426) and Windows kernel (PSP 199C, 0x8664 paragraphs)
+never DOS-terminate: control returns to WIN.COM main (`1000:01BC`) by DOSX's real-mode exit without any INT 21h AH=4C/49,
+so their MCBs stay owned and WIN.COM's `EXEC dswap.exe / wswap.exe` fails (largest free 0x696 < 0x13EB) and loops printing
+"Missing/unable to load". Tried and reverted (no effect): freeing foreign-owned blocks in `Machine.dosTerminate`, and
+freeing them inside `Dos.FN[0x4B]` when the caller CS equals the root PSP (the guard never matched; `machine.pspSeg` or the
+stub-frame CS is not what the check assumed; log CS/pspSeg inside FN[0x4B] first). Next step: free owner 1426/199C blocks at the
+moment DOSX leaves for WIN.COM main (find that far transfer with `--tail-on-pc 1000:01BC`), then check whether WIN.COM execs
+COMMAND.COM. EXEC-return semantics for WSWAP children are already implemented and tested.
+
+**R12 part 4 twelfth pass addendum (goal 5, MS-DOS Prompt): EXEC children of WSWAP now return to the caller; the next blocker is memory.**
+`Dos.FN[0x4B]` (AL=0) saves the caller's CS:IP/SS:SP/registers (`execFrames[childPsp]`) when the program is
+`WSWAP.EXE` (or anything started while such a child runs) and `AH=4C` frees the child's blocks (AH=48 blocks it
+allocates are now owned by it), restores the caller, clears CF (also in the stub's IRET frame) and leaves the exit code for
+AH=4D. Other EXECs keep the old load-and-run behaviour, so WIN.COM's own exit path is unchanged. (`cpu.dosxResident` is
+NOT set in this flow, so it cannot be the discriminator.) Test `dos_exec_child_returns_to_caller_when_dosx_resident`.
+New behaviour with `--dosbox 1`: the machine no longer ends when WSWAP exits; WIN.COM main (1000:01BC..01F7) does
+AH=4D, AH=48 BX=FFFF, then tries `dswap.exe` and `wswap.exe` again and prints
+"C:\WINDOWS\system\wswap.exe: Missing/unable to load." forever because `EXEC failed: no 13EB paragraphs (largest 696)`:
+the memory map then is `1426+575/1426` and `199C+8664/199C` (the exited DOSX and Windows kernel PSPs, ~548 KB) never freed,
+plus small blocks owned by them at 8A7/8E8. EXEC now logs the block map on this failure. Next: find which 4C ends the
+kernel (it is not `Machine.dosTerminate`'s dosxResident branch; freeing owner~=0/8 blocks there changed nothing) and free
+the owner's blocks there, then see whether WIN.COM execs COMMAND.COM and what the grabber needs. In real standard mode the
+DOS prompt is a full-screen text session, not a window; the stand-in COMMAND.COM should show `C:\>`. Swap file drive
+(A:) was left alone: the VFS ignores drive letters, so A: is harmless; revisit with TEMP=/SwapDisk if WSWAP checks space.
+Also exercised by mouse: File Manager (double-click on the `system` tree folder re-titles the window
+`C:\WINDOWS\SYSTEM\*.*` with an hourglass; the file pane had not repopulated by the second shot, ~1M steps later) and
+Control Panel (double-click on Date/Time opens the Date & Time dialog correctly).
+
+**R12 part 4 twelfth pass (2026-11-17): guest cursor drift fixed (CPU IMUL bug), Solitaire/Paintbrush/Write/File
+Manager/Control Panel driven by the mouse, three more DOS/CPU gaps closed; MS-DOS Prompt traced to WSWAP.**
+Everything driven only through `machine:keyDown/keyUp/setMouse/syncMouse` via the git-ignored probe
+(`media/win31/probe31.lua --steps N --key-at 40000000 --script "..."`, many runs in parallel, ~5 min each;
+new local flags `--trace-mouse74`, `--tail-dump`, `--log-int STEP`, `--log-2f`, `--dosbox 1` which seeds a tiny
+stand-in `C:\WINDOWS\COMMAND.COM`, and TEXTBUF output at the end of a run).
+- Cursor drift root cause (`CPU`, not the mouse path): one-operand `IMUL r/m16` (F7 /5) computed DX with
+  truncating division, so negative products left DX=0 instead of FFFFh. MOUSE.DRV scales every PS/2 delta with
+  `imul cx` / `imul [30]` and accumulates in a 32-bit fixed point (`idiv 1000h`), so every leftward or upward
+  packet became +16 counts (+32 px): -5 counts moved the cursor +22 px, a -400 px jump landed at -335. Found by
+  ringing the guest instructions of one INT 74h delivery (decoded packet was right, `imul` result wrong).
+  After the fix a 10 move sequence (+-20..60 px, both axes) lands exactly on the requested pixels. Commit "cpu:
+  one-operand IMUL ..." with test `imul_word_negative_product_sign_extends_dx`.
+- Solitaire: `sync`, then drag Q of spades onto K of hearts (press, three moves with button down, release) moves the
+  card and flips the revealed card; stock click deals three. Paintbrush (`pbrush.exe`) launched after the AH=56 fix
+  and a four-segment mouse drag draws a polyline. Write types text and shows the I-beam cursor.
+- File Manager (`winfile.exe`) now draws the drive bar and C:\WINDOWS listing. It had died with "unhandled interrupt 03
+  at 0000:0025": it probes drive A: with INT 25h (absolute disk read) through DOSX, whose RM reflector far-called
+  IVT[25h] = 0000:0000. INT 25h/26h now point at `F100:00D0/D4` stubs (`INT A5/A6; RETF`) that fail with AX=8002 (drive
+  not ready) and leave the caller's flags on the stack as real DOS does. Test `int25_absolute_disk_read_fails_not_ready`.
+- Control Panel (`control.exe`) renders its icon grid and status line with no fault.
+- Paintbrush needed INT 21h AH=56 (rename), WINOLDAP needs AH=58 (alloc strategy / UMB link): both were
+  unsupported-function host aborts; implemented (`Vfs:rename`, `Dos.allocStrategy`), tests `dos_56_rename_file`,
+  `dos_58_allocation_strategy`.
+- Exit Windows text screen: it is not a VGA bug. After File>Exit Windows the machine ends (exit 0) with mode 3 set
+  and the text buffer at B8000 empty (TEXTBUF nonspace=0) because nothing prints on exit and there is no COMMAND.COM
+  to show a prompt (README: not part of the Windows media). A black text screen is the faithful result.
+- MS-DOS Prompt (standard mode): `command.com` via Run fails with "Cannot find file" without a COMMAND.COM. With a
+  stand-in COM seeded (`--dosbox 1`) WINOLDAP opens COMMAND.PIF/_DEFAULT.PIF (absent, fine), then KRNL286/DOSX EXEC
+  `C:\WINDOWS\SYSTEM\WSWAP.EXE`, which creates `A:\~WOA100F.TMP` (swap file; note drive A:), writes the Windows image,
+  closes it, and ends with `INT 21h AH=4C AL=0`. That terminates the whole machine (exit 0 at ~42.58M) instead of
+  returning to the EXEC caller, because `Dos.FN[0x4B]` is load-and-run: the child PSP's INT 22h is the self-loop
+  `0000:pspSeg`, which `dosTerminate` treats as "root, end machine". Next: give AH=4B AL=0 real return semantics for
+  children started from DOSX/KRNL (save caller SS:SP/CS:IP+flags, restore on AH=4C, CF=0, AX preserved, AH=4D code)
+  without disturbing WIN.COM's own exit path, then see whether DOSX EXECs COMMAND.COM next and what OLIGRAB/the grabber
+  needs (`INT 10h AH=11` was also reported unhandled just before). Also point WSWAP's swap file at a real drive (TEMP=).
+- Write: mouse drag-select highlights text and dragging the title bar moves the window (screenshots checked).
+- Open: File Manager mouse use, Paintbrush
+  tools other than the freehand polyline, and the Control Panel applets are untested.
+
+**R12 part 4 eleventh pass (2026-11-17): interactive Program Manager works - menus, Run, Calculator,
+Notepad, Exit Windows to DOS, mouse clicks/double-clicks.**
+Driven entirely through the emulated machine's own input API (`machine:keyDown/keyUp`,
+`machine:setMouse/syncMouse`) by new local probe flags (media/win31/probe31.lua, git-ignored):
+`--script "alt+f r type:calc.exe enter w8000000 shot:name m:X,Y,B sync ctrl+f6 ..."` (tokens run
+from `--key-at`; `wN` waits N steps, `shot:NAME` writes media/win31/shots/NAME.rgba, convert with
+PIL `Image.frombytes('RGBA',(640,480),...)`), `--dos-after STEP` (INT 21 trace with file names),
+`--trace-mouseirq STEP`. Progman idles at ~40M steps; a run to a shot costs ~4-5 min.
+Verified: Alt+F File menu (New/Open/Run/Exit Windows), Run dialog, CALC.EXE (1+2 = 3, buttons
+clean), Alt+F4 closes it back to Progman, NOTEPAD (typed text, "save changes?" dialog, No),
+File>Exit Windows dialog, Enter -> Windows ends and WIN.COM returns to DOS (clean exit 0),
+mouse: `syncMouse` then absolute moves land exactly (200px jumps exact), double-click on the
+minimized Games icon restores the group, double-click on the Calculator icon launches it, button
+clicks work. Fixes (each with a regression test):
+- `f262930` dos: INT 21h AH=59 (get extended error) was an unsupported-function host abort when
+  Progman launched an app (KRNL286 calls it after a failed file op).
+- `cdfa90b` vga: write modes 0/2/3 now route the source through the ALU function select, and mode 3
+  always uses set/reset (enable ignored) as source per the VGA spec. The old code used the latch as
+  mode-3 source and skipped the function for set/reset planes, which drew coloured opaque boxes
+  behind glyphs (Calculator MC/MR/CE/Back/+- labels). Likely also the cause of the Tetris score
+  box artifacts noted in section 6 (not rechecked).
+- `d70bf5f` dos: AH=4C on a PSP created by AH=55 (KERNEL's per-task PSP) frees its arena blocks and
+  returns to the caller instead of jumping to PSP:000A (the parent's WIN.COM return address); any
+  app exit ended the whole Windows session with exit 0.
+- `2c3f81b` machine: shutdown-9 resume (`Machine.shutdownResume`) leaves a one-instruction
+  interrupt shadow after its STI. DOSX's resume code at 1861:0C13 begins with CLI and still holds
+  the other mode's SS:SP in its [24C0] slot; the mouse INT 74h callback landing on that instruction
+  re-entered DOSX, clobbered the slot and the later IRET went to 1436:0000 (#GP "CS selector 1427
+  is not a code segment") while clicking Calculator buttons.
+Open: after launching Calculator by mouse the Windows cursor drifted from the host position in one
+run (cursor ~0.8x of the requested displacement after several moves/clicks; not seen on a clean
+desktop). Not reproduced in isolation; suspect packets coalesced/dropped while the guest is busy
+or MOUSE.DRV acceleration. SOL.EXE (Run dialog) also launches and deals a correct board with card
+bitmaps (CARDS.DLL), ~12M steps after Enter, no fault. Next frontier: Solitaire play with the mouse, Write/Paintbrush with the mouse
+(drag/paint), File Manager, MS-DOS Prompt (needs a PIF/DOS box in standard mode), Control Panel,
+exit-to-DOS screen contents (text mode), the cursor drift above.
+
+**R12 part 4 tenth pass (2026-11-17): the Main group caption overlap was not an emulation bug.**
+The probe (media/win31/probe31.lua, git-ignored) synthesizes MAIN.GRP itself and
+placed items at y = 8 + row*56, x = 8 + column*72. Win 3.1 Program Manager draws the
+two-line caption (2 x 16px system font) under a 32px icon, so rows 56px apart collide
+exactly as seen; GetTextExtent/font/VGA planar paths are fine. With item spacing
+75 x 72 and a 270px tall Main window (Accessories opened too, via GROUP_LAYOUTS
+cmdShow=1) the 40M-step shot shows correct title bars, menu bar, icon bitmaps,
+two-line captions, scrollbars, group window frames and minimized Games icon; no
+fault, exit or wait through 40M steps (Program Manager idle). No repo code changed,
+so no regression test applies; the layout lives only in the local probe. Real
+3.1 setup would let Progman auto-arrange. Next frontier: needs input
+(menus, opening/running apps) which the headless probe has no driver for yet
+(`--scenario`/`--key-at` exist but were not exercised this pass).
+
+**R12 part 4 ninth pass (2026-11-16): Windows 3.1 standard mode boots to a drawn
+Program Manager (Main group, Accessories/Games icons, mouse cursor) at ~38M steps.**
+The "return to 1AAD" frontier was not a corrupted IP. The caller was `040F:1AA8`
+(KRNL286 segment 2, selector 040F) and the pushed CS:IP 040F:1AAD was right.
+Selector 040F's LDT descriptor had access 7B (P=0, code) because KRNL286
+demand-loads its segments from its own #NP handler. `Cpu.loadSeg` silently
+"auto-aliased" the not-present selector (cache base = sel*16) without updating the
+CS register, so execution continued at 0407:1AAD. Likewise a far CALL to
+not-present 0417 fell into the PM->RM far-transfer hack and ran zeroed real-mode
+memory to an INT 20h (a clean exit 0 that WIN.COM then turned into 255).
+Fixes (commit f3cb0ed, tests in PmCpuTests/DosTests):
+- New restartable-fault mechanism: `Cpu.fault(n, errorCode)` raises a sentinel
+  that `Cpu.step` (now pcall-wrapped around the handler) catches; it rolls IP to
+  `opIp` and SP to `opSp` and delivers the exception through `Cpu.interrupt`.
+  It is a no-op (returns false, legacy behaviour kept) outside `Cpu.step`, in
+  real mode, or when the guest IDT has no present gate for the vector.
+- Not-present code/data descriptors in `loadSeg` -> #NP (#SS for SS), error code
+  = selector & FFFC; not-present code/gate in `farCall` -> #NP.
+- Segment limit violations in `Cpu.linear` (including expand-down) -> #GP(0)
+  delivered to the guest when IDT gate 13 is present; otherwise still the host
+  "#GP: ... exceeds limit" Lua error. A fault inside a host-side DOS/BIOS handler
+  running within a step is delivered as a fault at the INT instruction.
+- `INT 21h AH=4D` wrote CX instead of AX; WIN.COM's exit path (`mov ah,4D`) then
+  re-terminated with AL=FFh. Now AL = child code, AH = 0.
+Probe (media/win31/probe31.lua, local, git-ignored): `--trace-int4c`,
+`--tail-on-pe-off` (dump the ring at every PE 1->0), `--trace-tail N` ring now
+also prints `ssb=` (SS base); `--watch-range` cap raised to 200000 entries and
+`--trace-dosfn "4C"` dumps the tail ring.
+Remaining after this pass: run to 40M steps shows Program Manager idle (screen
+dumped via `--shot-out`, convert `shot.rgba` 640x480 RGBA). Main group icon
+captions overlap ("File Manager"/"MS-DOS Prompt" rows) - cosmetic, likely VGA
+text/font or the icon-title wrap; no further fault. Boot takes ~11 s of host time
+per 6M steps; Program Manager appears well before 40M.
+
+**R12 part 4 eighth pass (2026-11-16): the 0xFF exit was a scrambled-register
+resume, fixed; the machine now boots KRNL286 through SYSTEM.DRV/VGA.DRV/GDI/USER.**
+Why KRNL286 exited 0xFF: its segment-2 loader (`0407:AC0F`, the compaction of
+the not-yet-loaded part of the bound image) read the segment from 0x100 bytes
+too far, so segment 2 (selector 040F) kept its raw linker chain words and a
+cleanup `call far 0C9B:4B9C` (a chain link, not a selector) fell through the PM->RM
+far-transfer hack into zeroed real-mode memory and hit `INT 20h` -> exit. The
+0x100 came from `[5B2] = CX>>4` at `02EF:9A6A`: CX was 0x030F instead of 0x0400.
+Root cause was `Machine.shutdownResume` status 09h (the INT 15h/87h-style PM->RM
+return DOSX uses): it popped the PUSHAW frame as AX,CX,DX,BX,SP,BP,SI,DI but
+PUSHAW stores AX highest, so POPAW order is DI,SI,BP,SP,BX,DX,CX,AX. Every GPR
+came back permuted across each DOSX mode switch (CX/SI swapped etc.). Fixed in
+`2bb9810` (test `pm_shutdown_09_popaw_register_order`).
+Follow-ups the fix exposed, each with a regression test:
+- `39fd3b0` `0F FF` (UD0) on a 286 now delivers INT 6 as a fault (pushed IP =
+  opcode start). KRNL286 installs a #UD handler (DOSX INT 31h AX=0203) and
+  executes `0F FF` on purpose at `0407:9F05`.
+- `e3ab88f` INT 21h AH=1B/1C (allocation information; DS:BX -> media-ID byte)
+  was an "unsupported function" fault at ~334k steps.
+- `aa1a135` `dosTerminate`: a PSP that already terminated once (or whose INT 22h
+  is its own INT 20h) now ends the machine instead of resuming its exit path
+  again (the old 1861:0215 AH=4Ch loop). `Machine.terminated[psp]` is cleared
+  when a program is loaded at that PSP.
+Probe notes (media/win31/probe31.lua, local): new flags `--tail-on-pc SEG:OFF`,
+`--tail-on-write ADDR=VAL`, `--tail-on-cx HEX`, `--trace-triple`, `--trace-farbad
+SEL`, `--trace-dosfn "3F 4B ..."`, `--trace-fileio`, `--watch-range HEX
+--watch-len HEX [--watch-skip SEG:OFF]`, `--ldt-sels "03C7 ..."`.
+Layout facts worth keeping: KRNL286.EXE is a LINK /HIGH bound NE (min/max alloc
+0); the existing top-of-block mapping is right (image cs=8E9C, file start =
+cs*16-0x200, PSP at the bottom of the block; the kernel's heap block 03A7 starts
+at PSP+0x230). Mapping the image at PSP+0x10 instead overlaps the kernel's own
+code with its heap and faults at 130k; do not "fix" it that way. The kernel's
+bootstrap (`GlobalInit` at KRNL286 seg1:B04C, `[5B0]/[5B2]` paragraph math at
+9DD4..9E12) is correct once CX survives the mode switch.
+New frontier (step ~2.61M, `--steps 4000000`): after loading SYSTEM.DRV,
+KEYBOARD.DRV, MOUSE.DRV, VGA.DRV, MMSOUND.DRV, COMM.DRV, VGASYS/OEM/FIX.FON,
+GDI.EXE and USER.EXE, a far return lands at `0407:1AAD`, two bytes past the
+return address its caller pushed (`1AAB`, after `call 1B41` at `1AA8`), i.e.
+mid-instruction (`xor dx,dx` entered at its second byte); the next instruction
+then faults `#GP: ds selector 0427 offset 8F88 exceeds limit 21EF`. The stack
+slot read by `retf 8` at `0407:09AB` holds 1AAD, so something added 2 to a saved
+IP (an exception-resume that skips a 2-byte instruction, e.g. the UD0 style
+handler, or a stale far-call frame) or the frame was corrupted. Next: ring the
+writes to that stack slot (`--watch-range` on the SS:0F0C..0F10 linear address
+at step ~2.60M) to see who stored 0x1AAD, and check whether an exception was
+delivered just before (a #GP currently aborts as a Lua error instead of being
+delivered to the guest IDT, only INT 0/5/6/13 explicit paths deliver).
+
+Next session (R12 part 4 continued): disassemble WIN.COM's INT 21h handler
+at 0x125E:0x05CC (linear 0x126CC = WIN.COM file offset 0x5CC via the
+image-at-0x10100 mapping) — the handler code between offset 0x5CC and the
+event-flag writes at 0x18C — to find the bit-set sites and determine why
+they don't fire in our boot. The handler passes through to our core's
+INT 21h (the FN[0x48] wrapper sees the AH=48 calls), so the question is
+whether the handler's post-processing (which should set the 0x18C bits)
+depends on state we don't provide, or whether the handler skips the
+bit-set for specific AH values (like AH=4B EXEC). — the table is
+byte-correct (only one copy exists; no 4B00) and the EXEC was never routed
+through WIN.COM's INT 21h hook (the scan's INT 21h vector is our core's
+default stub). The spin is a PM→RM callback with AX=0x4B00 dispatched into
+WIN.COM's callback table. The open question: **which callback address the
+PM-side caller invoked, and whether a DOSX-side callback (which can EXEC)
+exists and should have been called instead.** Enumerate the real-mode
+callback registrations (DPMI INT 31h AX=0303/0304 — log ES:DI handler,
+DS:SI, returned CX:DX handle), then at the 4B00 invocation identify which
+registered address was invoked and where the PM-side caller loaded its
+callback pointer from (WIN.COM's phase-2 handoff, the DPMI callback
+allocation, or the 0x1861:0x97B INT 2Fh handler).
+
+
+## Current state (2026-11-03, R7)
+
+- `main` is one clean commit (`windows 3.0a in roblox`); the old graph lives
+  only in the local `backup-before-squash` tag. Releases: `v0.6.1` (latest)
+  with `Vdm.rbxmx` and `Vdm-demo.rbxlx`; `v0.6.0` is the first cut.
+- **Microsoft Tetris 2.0 is playable.** It stages under
+  `media/win30/staged/tetris`, queues through `WIN.INI [windows] run=`, dismisses
+  the About box, starts via Game > New, and renders falling/stacked pieces in
+  the board. The earlier blank board was not a GDI/VGA blit bug: Windows was
+  running with interrupts disabled at idle, so no WM_TIMER reached Tetris.
+  `docs/screenshots/r6-tetris.png` is the verified 640x480 board.
+- **Timer/IF fix (root cause):** `Cpu.interrupt`'s inline chained-stub path
+  wrote the handler's cleared IF into the caller's saved flags, so an INT 2Fh
+  chain left the guest with interrupts off. It now preserves the saved IF and
+  only propagates the handler's result flags. The keyboard and mouse IRQ
+  dispatchers also honour IF, because a maskable IRQ taken during a critical
+  section saves IF=0 and the handler's IRET would never re-enable interrupts.
+- **Cursor fix:** the client polls the pointer every Heartbeat with the GUI
+  inset (not just InputChanged), reads AbsolutePosition/Size fresh each frame,
+  hides the host arrow for the whole VDM window, and re-anchors after a resize
+  or clamp jump. In Studio it captures the pointer with
+  `MouseBehavior.LockCurrentPosition` and drives the guest from GetMouseDelta;
+  moving the virtual pointer out of the window releases it. PrintWindow shows a
+  single guest cursor and the OK-button click test dismisses the About box.
+- **PC speaker path:** the guest's 8254 channel 2 divisor (ports 0x43/0x42)
+  and the 0x61 gate bits 0+1 are modelled. `Machine:speakerState()` exposes
+  `{enabled, frequency, sequence}`; the client retriggers one short stock
+  Roblox beep on an enable/frequency change and publishes `VdmSpeaker`.
+  Tetris itself only writes 0x61 bit 7 (A20), so its sound is not yet driven;
+  the path is covered by a guest I/O test and is ready for apps that use the
+  PC speaker.
+- **R7 Windows 3.1 progress (eighteenth pass):** `cpuLevel` is `"8086" | "286" |
+  "386"` and defaults to 8086, so the 3.0a baseline is unchanged. With
+  `cpuLevel="286"`, 4 MiB RAM and XMS, real `WIN.COM`/`WIN.CNF` passes the
+  HIMEM/CPU probes, runs `WSWAP.EXE`, EXECs and EXEPACK-unpacks
+  `SYSTEM\DOSX.EXE`, builds/copies its GDT, `LJMP 0078:0B0E` enters PM, and
+  DOSX runs `LLDT 0x38`, `LTR 0x88`, then `IRET`s to `0x5B:0xB51` in ring 3.
+  The ring-3 `lcall 0xCB,0` call gate enters ring 0 at `0078:0C5D` with
+  SS0=0x68/SP0=0x30A8 and the nested frame at 0x309E.
+- **LIDT/IDT selection:** `LIDT [DS:0x2A31]` at `0078:0C5D` reads six zero
+  bytes (DS=0x4B/base 0x340D0); this is an uninitialised copy. The intended
+  real-callback table is the compact 8-entry IDT at **liveBase+0x470 =
+  0x110470, limit 0x3F**. Its vector 3 originally targets `0053:0FE3` (PM
+  stub); the correct target is the clear-PE switch helper at `0078:0C63`.
+  `loadTable` selects that compact IDT on an all-zero LIDT operand and
+  patches vector 3 to `0078:0C63` as a present interrupt gate. IDTR becomes
+  `base=0x110470 limit=0x003F`; later zero LIDTs from the helper keep it.
+- PM interrupt/trap-gate delivery (types 6/7/E/F, DPL/present/type checks,
+  TSS ring switch, IP/CS/FLAGS frame, optional error code, IF/TF semantics)
+  remains in place; software INT/INT3 use the IDT and real-mode IVT is
+  unchanged.
+- **Switch helper (solved):** `0078:0C63` (CS base 0x38380, `CS:[0]=0x340D`)
+  runs `PUSH DX; PUSH EAX` (`66 50` -> 32-bit push at 286);
+  `MOV DX,CS:[0]`; `MOV EAX,CR0`; `AND AL,FE`; `LIDT [0x122]` (zero operand,
+  compact IDT kept); `MOV CR0,EAX` -> **CR0=0, PE cleared**;
+  `LJMP 3838:0C7D` reloads real CS (base 0x38380); then
+  `MOV SS/DS/ES,0x340D; POP EAX; POP DX; RET`. `0078:0FE3` is a different
+  routine: it ends in `POP DS`, which pops the INT3 frame's saved IP
+  (0x0C63, the post-INT3 offset) and faults at `0078:0FF1`.
+- **Frame dump at the second helper return (no fault):** 4M/8M complete
+  cleanly; 4M PC=`3838:1C21`, 8M PC=`3838:34C2`, PE=0, selectors
+  3838/340D/340D/340D. At 64M it is still in the loader loop (`3838:1C7F`).
+  At `3838:0C86`, SS=340D base 0x340D0, SP=0x3098:
+  `[0C63, 0078, 0046, 0C05, 005B, 0046, 3068, 004B]`.
+  - INT3 frame at 0x3098: IP=`0C63`, CS=`0078`, FLAGS=`0046`.
+  - Call-gate frame at 0x309E: IP=`0C05`, CS=`005B`, FLAGS=`0046`,
+    oldSP=`3068`, oldSS=`004B`.
+  - Helper push/pop widths are balanced (`PUSH DX` 2 + `PUSH EAX` 4;
+    `POP EAX` 4 + `POP DX` 2). No push32/pop32 bug.
+  - First near RET pops saved IP `0C63`; second near RET pops saved CS
+    `0078` as IP, leaving FLAGS. The extra frame is the 3-word INT3 frame.
+- **The real callback return is `3838:0C13`, not `0x7C`.** At DS:0x0F0
+  (physical 0x341C0): `340D 0C13 3838 0046 ...`, a far return to
+  `3838:0C13` with DS=0x340D. `0C13` restores the PIC/IVT
+  (`CLI; XOR AX,AX; MOV ES,AX; ... OUT 0x21; ... OUT 0x70; RET`).
+  `0x7C` is only the instruction after the initial `LJMP 0053:0004`.
+  Diagnostic RET-target patches: `0C7C` exits at step 75,415 (no KRNL286);
+  `0C13` continues (4M PM `005B:0B92`, 8M RM `3838:00CC`, 16M RM
+  `3838:34C3`); `0C05` faults at `0000:0085`. The patches are not committed.
+- **Handoff trace (gate53 diagnostic):** `005B:359B` self-copy runs with CS
+  base `0x49190`, DS=`005B`, ES=`004B`, SI=`35EC`, DI=`789C`, CX=0; it copies
+  `0x35EC` bytes from loader CS:0, patches GDT descriptors at ES:[0x58]/
+  ES:[0x78], then `LJMP 005B:35BD`. Later `005B` CS base is `0x38380`: the
+  loader is relocated from `0x49190` down to `0x38380`.
+  - `005B:0C00` gate stack: `[0C05,005B,0046,oldSP,oldSS]`; DS:0x0F0 already
+    holds `340D 0C13 3838 0046 35CF 2C70`.
+  - `0053:0FE3` entry stack: `[0C63,0078,0046,0C05,005B,0046,oldSP,004B]`.
+    `148F` adds `0FE6`, sets SS=`004B`/SP=`[0x100]` (`42B0`), then `14DC`
+    `LJMP 005B:0340` with **PE=1**.
+  - `005B:0340` calls `0B61`, which re-enters the 0C00 gate; the stack
+    descends `42AC -> 412C -> 3FAC -> 3E2C ...`, then `005B:0367` sets ES=0
+    and `005B:036B` faults at `005B:036F` reading IVT INT 91.
+  - The `0C63` path breaks recursion by clearing PE, but its INT3 frame
+    returns to `0x78` and never consumes the DS:0x0F0 `0C13` frame.
+- **First-pass 286 callback (`[0x134]=2`, `[0x2F5A]=0`):**
+  - `005B:0B9A` pushes `0C13/3838/0046` on the **SS=004B stack at
+    SP=0x00F2**; `[0x2A3F]=0`, `[0x100]=0x42B0`.
+  - `005B:0C00` gate stack:
+    `[340D,340D,0078,35EC,4B00,00F2,340D,0003]`; gate frame old SS/SP
+    `004B:00DE`.
+  - `0053:0FE3` sets SS=`004B`/SP=`[0x100]` (`42B0`), discarding the 0x00F2
+    frame; `14DC` enters `005B:0340` with **PE=1**.
+  - `005B:0340` calls `0B61` again; `[0x134]=2` pushes another
+    `0C13/3838/0046` frame at SP~0x42A4 and calls the gate again.
+- **Contract decision:** `[0x134]=2` selects the **286 callback path**, whose
+  frame is the SS=004B stack at SP~0x00F2 (`0C13/3838/0046`), not the DS:0x0F0
+  data copy. However, the forced-entry experiment (temporary probe, not
+  committed) set the first `005B:0340` entry to PE=0/SS=004B/SP=0x00F2: the
+  guest **exits at step 75,238** (`exit=0`, no fault, no KRNL286 EXEC; final
+  PC `00CB:F352`). `0340`'s `CALL 0B61` then runs the PM `LCALL 0xCB` path,
+  so `0340` is PM code with a real-mode-style `ES=0` access, not a PE=0
+  real-mode callback. GDT[0] is correctly null; selector 0x18 is the only
+  real-mode alias, and the handler does not use it.
+- **Disassembly comparison:** `0B92 PUSHF; 0B93 PUSH [0x148]; 0B97 PUSH
+  0C13; 0B9A MOV AX,CS:[0]` pushes the outer `0C13/3838/0046` frame on the
+  SS=004B stack at SP=0x00F2. `148F` instead sets DS/SS from `0053:[0]`
+  (0x004B), `SP=[0x100]` (0x42B0), `[0x100] -= [0x2F6F]`, and jumps
+  `005B:0340` with PE=1, starting a nested callback stack and never using
+  the 0x00F2 frame. `0340` is PM code (`CALL 0B61` uses the PM gate). GDT[0]
+  is null; only selector 0x18 is a base-0/limit-FFFF real-mode alias, but
+  the handler uses ES=0. There is no consistent real-mode callback entry.
+- **Evidence:** call-gate and INT3 frames are built correctly. The helper
+  receives the INT3 stack frame; the outer callback frame is the SS=004B
+  frame. `0053:0FE3` leaves PE=1 before `005B:0340`, so ES=0 faults. The
+  guest setup is inconsistent with the emulator's PM null-selector
+  semantics; do not patch the guest stack or special-case 0x78/0x7C/0C13.
+- **GDT[0]/alias check:** at `0053:148F`, `005B:0340`, and `005B:0367` the
+  dumps are identical: `GDTR=0x110800/0x011F`, `GDT[0]=0000 0000 0000 0000`
+  (null), `GDT[0x18]=FFFF 0000 F200 0000` (limit 0xFFFF, base 0, data RW
+  DPL3). No `B8 18 00`/`8E C0 18` code or runtime patch of the handler's
+  `XOR AX,AX; MOV ES,AX` exists. Writes to the handler region at step 42000
+  are the temporary IDT gate table; the 44000 self-copy restores the handler.
+  GDT[0] writes are only XMS setup at 8000/42000. The GDT EMB copy keeps
+  GDT[0] null and selector 0x18 as the alias.
+- **286 reset path implemented (sixteenth pass):** on `cpuLevel=286`, zero
+  `LIDT` loads IDTR=0/0, INT3 triple-faults and `Cpu:reset` runs; `MOV
+  CR0`/`MOV DR` are `#UD` on 286. `Machine` models CMOS 0x70/0x71 and the
+  PC/AT shutdown handlers: 09h restores BDA `0040:0069/0067` SS:SP, pops
+  DS/ES/PUSHAW, `RETF 2` to `3838:0C13`, and disables A20; 0Ah jumps to the
+  BDA CS:IP and preserves A20. The probe resets at step 44000 and then EXECs
+  **`C:\WINDOWS\SYSTEM\KRNL286.EXE`**.
+- **VERR/VERW fix (seventeenth pass):** `0F 00 /4` and `/5` used to set
+  `ZF = (descriptor == nil)`, backwards for both instructions. DOSX's API
+  `0x0A` alias creation at `0053:2C71` begins `MOV AX,BX; VERR AX`; KRNL286
+  calls it with `BX=CS=02EF`, so the old VERR cleared ZF and the alias was
+  never created. KRNL286's `MOV DS, CS:[0x30]` thunk at `02EF:2672` then
+  produced DS=0 at `02EF:1CFE`. `Cpu` now implements VERR/VERW with
+  present/S/type/DPL checks; null/absent/system selectors clear ZF without
+  faulting. KRNL286's header is now initialized (`CS:0x30 = 02E7`,
+  `CS:0x32 = 009B`), and the DS=0 fault is gone. At that point the next
+  fault was `0053:14FB`, `#GP: es selector 0C05: absent or outside LDT
+  limit`, PE=1, CS=0053, DS=02E7, ES=004B, SS=0068, CR0=1, last PC
+  `3838:0AAB`. That was DOSX's callback epilogue `0053:14E1`
+  (`POP DS; POP ES; IRET`); the ring-3 `LCALL 0xCB` at `005B:0C00` pushed a
+  ring-0 call-gate frame at `0068:309E` over the `148F` helper's saved ES
+  slot.
+- **Callback frame fix (eighteenth pass):** the `0053:14FB` fault was the
+  missing outer-privilege `RETF`, not just the call-gate frame. The `0070`
+  dispatcher returns from ring 0 to ring 3 with
+  `[IP=0E63, CS=0053, SP=01F8, SS=027F]` at `0068:309C`; our `RETF` popped
+  only IP/CS, so `148F` ran on `0068:30A0` instead of `027F:01F8`.
+  `RETF`/`RETF imm16` now pop SP and SS when the return CS.RPL is greater
+  than CPL. The `148F` entry is now `SS=027F, SP=01F6`, top
+  `[0E66, 9A19, 02EF, 0296, ...]`; the `14E1` frame is
+  `[DS=02E7, ES=02DF, IP=9A19, CS=02EF, FLAGS=0296, ...]` and IRETs to
+  KRNL286 at `02EF:9A19`. The 16-bit call-gate frame was also corrected to
+  IP, CS, old SP, old SS, params (no FLAGS), matching the Intel 286 manual
+  Figure 7-12 and 86Box. Probe now reaches step **144000**. Next fault:
+  `02EF:728C`, `#GP: es selector FB00: absent or outside GDT limit`, from
+  `MOV ES,[BP-4]` at `02EF:7289` with `[BP-4]=FB00`; PE=1, CS=02EF base
+  `0x8FDB0`, DS=02EF, ES=03F7, SS=027F, SP=01B0, AX=FB00, BX=02EF,
+  CX=B6CB, SI=0040, DI=B6CB, BP=01CC; last PC `0053:2197`.
+- **PE transitions:** `Cpu:setPE` plus `MOV CR0`/`LMSW` clear paths are
+  covered. Clearing PE makes subsequent `loadSeg` use `selector<<4` and limit
+  FFFF; current CS/SS caches remain for the instruction stream, so the next
+  far transfer reloads CS (286 hardware semantics).
+- **Protected-mode segment caches + call gates:** `Cpu` keeps
+  `segBase/segLimit/segAccess/segFlags/segSel` per segment. Real mode still
+  translates `sel<<4` with limit FFFF; PM `loadSeg` reads the GDT/LDT, checks
+  present/type/limit, and names the selector on `#GP`. Fetch, stack, ModRM,
+  string/moffs/XLAT, far control transfers and IRET use the cached base.
+  `farCall` decodes 286/386 call gates, validates DPL/target, switches to the
+  TSS ring stack, copies gate parameters and builds the nested frame; outer
+  IRET unwinds it. `LTR` caches the TSS base/limit and marks the descriptor
+  busy.
+- **XMS/HIMEM minimum:** `core/Xms.lua` owns INT 2Fh AX=4300/4310 and the far
+  entry at F100:00C0, implementing version, A20, HMA request/release, free
+  query, EMB allocate/free/lock/unlock/info and 0Bh moves. The 0Bh offset for
+  handle 0 is a packed segment:offset, as the XMS spec requires; 09h returns
+  the handle in DX. A20 starts enabled on 286+, and hypervisor stubs at
+  F100:0000-0FFF are write-protected because WSWAP zero-fills free RAM.
+- **Tetris score fields (open cosmetic):** `Score:`, `Level:` and `Lines:` draw
+  red digits (VGA index 12) at x≈41, while their opaque black text backgrounds
+  start at x≈51, one character cell to the right. The fills come from VGA.DRV
+  PCs 0D87:1AE5/1DF7 after the glyph writes; the values are not black-on-black
+  and the DAC/attribute palette is the normal EGA table. This is a
+  GDI text-alignment/background-rect or child-window paint-order issue, not a
+  simple palette swap; board/pieces are unaffected.
+- Remaining for 3.0a: Tetris score/level/lines value backgrounds, EMS (XMS is
+  now present but only enabled for `cpuLevel>=286`), Sound Blaster/AdLib (PC
+  speaker path now exists), printing/serial, OLE/clipboard, installers. For
+  3.1, descriptor caches, the ring-3 handoff, the first ring-3→ring-0 call
+  gate, IDT-delivered INT3, the compact real-callback IDT selection and the
+  clear-PE switch helper are done; the PM to real to PM round trip is green.
+  The real callback frame is `3838:0C13` at DS:0x0F0 (not 0x7C); the
+  call-gate/INT3 frames are correct, but `[0x134]=2` selects the 286 callback
+  path whose frame is the SS=004B stack at SP~0x00F2, while `0053:0FE3`
+  switches to SP=0x42B0 and runs `005B:0340` with PE=1. Forcing
+  PE=0/SS=004B/SP=0x00F2 makes the guest exit at step 75,238 (no KRNL286),
+  so `0340` is PM code. Disassembly shows `0B9A` pushes the outer 0C13 frame
+  on the SS=004B stack, `148F` starts a nested 0x42B0 stack and never uses
+  it, and GDT[0] is correctly null (selector 0x18 is the only real-mode
+  alias). The 286 reset path is now implemented (see the dedicated bullet);
+  DOSX reaches **KRNL286.EXE**. The KRNL286 DS=0 fault is fixed by correct
+  VERR/VERW semantics, and the DOSX callback frame is fixed by outer-ring
+  `RETF` plus the 286 call-gate frame layout. The next first fault is
+  `02EF:728C` (`#GP: es selector FB00`, PE=1) from `MOV ES,[BP-4]` with
+  `[BP-4]=FB00` after the `0053:2197` DOSX callback. The `--cpu 386` branch
+  is WIN386 enhanced mode (EXECs WIN386.EXE, first blocker `1110:5A66`
+  unhandled INT 05), not KRNL386, so R7 stays on the 286 path. 386 enhanced
+  mode remains later.
+- **Subsystem blockers (not implemented, exact):** printing has no LPT/PRN
+  device, INT 17h, spooler or GDI `StartDoc`/`StartPage`/`EndDoc` backend;
+  serial has no 8250 UART at 0x3F8-0x3FF/IRQ4, INT 14h or COMM.DRV backend;
+  OLE/clipboard has no OLE1 server/client DLLs, render-format negotiation,
+  bitmap/metafile clipboard formats or cross-process global heap; installers
+  run from the staged VFS only, with no floppy/disk-change device,
+  `COMMAND.COM`, `FORMAT` or multi-disk SETUP media source.
+
+## 0. Hard rules
+
+1. **Luau has no native bitwise operators** (`& | ~ << >>` do not parse).
+   Use `bit32` with local aliases (`const band, bor, lshift, rshift = ...`).
+   Verified against `luau-compile` and Lune 0.11.1.
+2. **`const` is available** (Luau 0.711+) and is the default for bindings that
+   are never reassigned. `local` only when the binding changes.
+3. **Core is environment-pure** (`core/`): no `require`, no `game`, no
+   `print`/`warn`, no filesystem. Dependencies arrive via `Machine.new(deps)`.
+   Host diagnostics go through `machine:log()` (→ `machine.diagnostics`).
+4. **Naming:** modules/types `PascalCase`, functions/methods/locals
+   `camelCase`, constants `SCREAMING_SNAKE_CASE`, module files
+   `PascalCase.lua`, tools `snake_case.lua`, Roblox entry points
+   `Name.client.lua`, tests `PascalCaseTests.lua`.
+5. **Types:** `--!strict` in `core/` (typed public APIs everywhere). Roblox
+   UI and tools are `--!nonstrict` because `luau-analyze` has no Roblox type
+   definitions; their public APIs are still annotated.
+6. Roblox work runs **client-side**; server only for future media/HttpService.
+7. UI work gets an independent agent QA pass before shipping.
+8. A style commit must leave `tools/check.lua` green and change no behaviour.
+
+## 1. Environment
+
+- Repo at `irl/RVDM` (git). Lune 0.11.1 at `tools/bin/lune.exe`.
+- Toolchain: `tools/bin/stylua.exe` 2.6.0, `selene.exe` 0.32.0,
+  `luau-analyze.exe`/`luau-compile.exe` 0.745. `rokit.toml` pins them for CI.
+- Run gates: `lune run tools/check.lua`
+  (format → lint luau → lint roblox → strict typecheck → tests).
+- Windows 3.0a media staged under `media/win30/` (git-ignored; WinWorld 3.0a
+  5.25" 1.2MB, SZDD-decompressed). Not committed.
+- Studio MCP bridge: `node tools/mcp.mjs call <tool> <json>` /
+  `callfile <tool> <argsFile>`. **execute_luau payloads must contain NO
+  backslashes**; sources go base64 via `tools/studio_deploy.lua`.
+
+## 2. Layout
+
+```
+core/           Memory Cpu Vfs Bios Dos Xms TextScreen Executables Machine Vga init
+fixtures/       Apps (generated), Kernel16, TestApps
+roblox/ui/      Theme Cleaner State Components Window init (VdmUi)
+roblox/client/  Emulator.client.lua ScreenSink
+tests/          CpuTests PmCpuTests XmsTests MachineTests DosTests GroupFileTests
+tools/          run check build_rbxmx studio_deploy install stage extract ...
+```
+
+## 3. What works (verified)
+
+- **CPU:** full 8086 real mode, strict-typed. `CMP` (group 1 /7) now produces
+  subtraction flags - it previously fell through to XOR, which silently broke
+  every `cmp/jb` in KERNEL and caused the fake AH=48 retry loop. Signed
+  `JL/JGE/JLE/JG` now compare SF/OF as booleans; comparing the mask values
+  (0x80 vs 0x800) inverted the condition when both flags were set and stalled
+  GDI's empty-clip path.
+- **286/386 CPU level:** `cpuLevel` defaults to `"8086"`; `"286"` adds
+  PUSHA/POPA, BOUND, PUSH/IMUL immediates, INS/OUTS, ENTER/LEAVE, 286 flag
+  semantics (bits 12-15 read 0) and the 0F system subset: SLDT/STR/LLDT/LTR/
+  VERR/VERW, SGDT/SIDT/LGDT/LIDT/SMSW/LMSW/INVLPG, LAR/LSL, FS/GS, MOV
+  CR/DR, MOVZX/MOVSX, BSF/BSR, BT*, SETcc, XADD, near Jcc rel32. `"386"` also
+  enables 0x66/0x67 and writable IOPL/NT bits. PE=1 selector loads stop with a
+  named protected-mode fault instead of treating a selector as a paragraph.
+- **DOS arena:** first-fit MCB chain with split/merge/resize, 1-paragraph MCB
+  gaps, zero-size allocations succeed at `arenaTop`. `dosBrk` is gone.
+- **DOS data area** at segment `0x0060`: 59-byte SFT with three `CON` entries
+  (stdin/out/err), list of lists at `AH=52` → `BX = LoL+2`, one DPB, a CON
+  device header, InDOS byte. Windows locates the SFT by finding three equally
+  spaced `CON ` names.
+- **NE loader:** real KERNEL/GDI/USER + 6 drivers load (`tools/load_real.lua`,
+  9 modules, imports resolved). Iterated segments, chained fixups, entry
+  tables, import-by-name/ordinal, and resident + non-resident export names are
+  handled (CALC/PBRUSH static loads pass; commit `e1decc0`). WRITE's 79
+  segments still need demand loading.
+- **App staging/harness:** `tools/install.lua` stages 164 VFS files including
+  `[shell]`/`[win.apps]`, fonts, generated program groups and shell settings;
+  `tools/app_harness.lua` boots the real media, statically NE-loads every
+  built-in, traces DOS/INT 2F and writes PNG screenshots. **All 20 SETUP.INF
+  applications** launch and render, including Solitaire, Terminal,
+  Clipboard, PIF Editor, Recorder, Print Manager and MS-DOS Executive. Its
+  file list and File Manager's tree both use the real DOS FindFirst DTA
+  layout (attr at 15h, size at 1Ah, name at 1Eh). Matrix + screenshots:
+  `docs/APP_COMPAT.md`.
+- **Bound MZ+NE EXEC:** `KERNEL.EXE` is mapped flat by the MZ stub at
+  `loadSeg - cparhdr`; `Dos.FN[0x4B]` now applies the NE relocations in place
+  before the stub jumps to the entry point.
+- **WIN.COM boot → Program Manager:** with `timerInterval=55_000`, `WIN.COM`
+  shrinks itself (AH=4A), EXECs KERNEL, validates DOS 5.0 / SFT / LoL /
+  arena, self-relocates, loads SYSTEM.DRV/KEYBOARD.DRV/MOUSE.DRV,
+  DISPLAY.DRV/VGA.DRV and the VGA fonts, loads real GDI.EXE and USER.EXE,
+  reads SYSTEM.INI/WIN.INI/PROGMAN.INI, loads the `[boot] shell` and renders
+  the real Program Manager window (640x480, File/Options/Window/Help).
+  `tools/out/clean55k-win.png` is the verified Lune screenshot.
+- **Environment:** WIN.COM keeps `windir=C:\WINDOWS\` (it joins KERNEL.EXE
+  directly), but children inherit `windir=C:\WINDOWS` without the trailing
+  separator; KERNEL's profile code appends its own, so the old double
+  backslash silently made SYSTEM.INI lookups fall back to defaults. `PATH`
+  is `C:\WINDOWS;C:\WINDOWS\SYSTEM`, so WIN87EM.DLL and other SYSTEM DLLs
+  resolve.
+- **Timer/PIC:** the 8259A in-service bit, OCW2 EOI, OCW1 mask and the 8086
+  one-instruction STI/POPF/IRET shadow are modelled. The BIOS EOI stub
+  preserves AX; `MOV AL,20h` alone silently corrupted GDI HDCs. The
+  diagnostic 25k PIT fires faster than real 18.2 Hz and trips KERNEL's
+  reentrancy guards (`fatal 0x140`); guest boots must use 55k.
+  `app_harness --timer N` selects the interval.
+- **Input:** an 8042-style keyboard controller latches set-1 make/break codes
+  on port 0x60, reports OBF on 0x64, and raises IRQ1. BIOS INT 9 acknowledges
+  the PIC and returns the latched byte for chained handlers; KEYBOARD.DRV does
+  the actual translation. The Roblox client maps KeyCodes to scan codes, sends
+  releases, repeats held keys at 20 cps, and releases everything on focus loss.
+  MOUSE.DRV's PS/2 path moves two screen pixels per count, so `setMouse` sends
+  half-counts with a remainder to keep the guest cursor under the host pointer.
+- **Harness:** `app_harness` no longer treats HLT as "exited"; it resumes
+  idle Windows loops on the next PIT tick and only stops on a keyboard wait
+  or a DOS exit.
+- **INT flags:** DOS/BIOS handler CF/ZF now reach the guest (inline dispatch
+  while a vector still points at the emulator stub), so `jc/jnc` after INT 21h
+  is trustworthy.
+- **Bound NE low area:** EXEC reserves the image plus a second image-sized area
+  plus 0x1000 paragraphs below it. KERNEL's self-relocation segments, local
+  heap and stack no longer collide (the old overlap made a KEYBOARD.DRV read
+  overwrite the stack and AnsiUpper's own code).
+- **Bound NE:** the MZ image is loaded high in the EXEC block
+  (`imageBase = pspSeg + programParas - imageParas`) and the eager
+  `relocateBoundNE` pass is gone; KERNEL's own chained-fixup pass runs with
+  intact chains.
+- **DOS EXEC layout:** `AH=4B` now allocates a fresh 0x40-paragraph
+  environment block and a fresh program block (PSP + actual image), sets MCB
+  owner = child PSP, sets `PSP:2` to the top of the program block, copies the
+  parent environment, and relocates a bound NE at `pspSeg + 0x10`.
+- **INT 67h:** EMM is reported as "not installed" (`AH=84h; IRET`).
+- **CPU:** `CMP r8,r/m8` and `CMP r16,r/m16` (0x38/0x39 family) no longer write
+  the result back to the destination register. This clobber was corrupting
+  KERNEL's path parser character by character.
+- **Environment trailer:** the PSP environment ends with `00 00`, a word count
+  (1), and the program's full path. KERNEL opens that path after the double
+  NUL; without it it tried to open the string `dir=`.
+- **EXEC arena reservation:** `AH=4B` now marks the PSP + loaded image as owned
+  in the MCB arena. Previously KERNEL's first `AH=48` returned 0x1100, which
+  overlapped its own code segment at 0x1124.
+- **DOS:** `AH=43` (get/set attributes) and `AH=57` (file date/time) added.
+- **VGA:** `core/Vga.lua` implements mode 12h (640x480x16 planar), mode 13h,
+  text-mode fallback, write modes 0/1/2, read map select, DAC/palette, dirty
+  rectangles, and RGBA snapshots. It is wired into `Memory` (A0000 aperture),
+  CPU ports `0x3B0..0x3DF`, `Bios` INT 10h (mode set/get, display combination),
+  and the client `VgaSink` (`EditableImage`). Studio-verified: `mode=12
+  size=640x480 BDA=12/80` and the 16-colour test pattern renders in the
+  Roblox window.
+- **Roblox:** Vdm + VdmUi + VdmFixtures client-side; NE4 renders in a themed
+  window; keyboard sends 8042 set-1 make/break scan codes (with typematic
+  repeat); guest faults are caught per frame.
+  Studio smoke tested in Place1: NE4 fixture works, and the real
+  WIN.COM → KERNEL chain boots in the same window via the generated
+  `fixtures/WinBoot*.lua` modules (`ReplicatedStorage` attribute
+  `VdmBootWindows`). Lune boots to Program Manager at 55k; Studio does too.
+  The generated WinBoot set includes `PROGMAN.EXE`, `PROGMAN.INI` and the
+  generated `MAIN.GRP`/`ACCESSOR.GRP`/`GAMES.GRP` (`WinBootGroups`), and
+  reuses `Install.writeSystemIni`, so shell/group/network settings match
+  Lune. Place B (placeId 111091505099004) renders Program Manager with the
+  Main group and minimized Accessories/Games at ~39M steps
+  (`docs/screenshots/r7-studio-program-manager.jpg`); the generated
+  `WinBootBig` bundle now carries every built-in app executable, so group
+  icons resolve instead of reporting "Cannot find file". The client requires
+  `VdmUi.Cleaner`/`VdmUi.Window` directly; requiring `VdmUi` first and then a
+  child trips Roblox's "tables cannot be cyclic" check.
+  **New Studio places need `Game Settings > Security > Allow Mesh / Image
+  APIs` enabled** or `EditableImage` creation fails and VgaSink falls back to
+  its coarse 32x24 frame grid. Place B has that setting plus
+  `Allow HTTP Requests` enabled.
+- **GUI rendering:** the VGA framebuffer → `EditableImage` sink is
+  authoritative. A native 1:1 ScreenGui mapping was prototyped and rejected:
+  USER/GDI paint into device contexts, and owner-draw/custom controls/bitmap
+  fonts/clipping/BitBlt cannot map without reimplementing the GUI. See
+  `roblox/gui/FEASIBILITY.md`; `Win3Skin` is for an optional emulator host
+  skin only, never guest UI.
+- **Fixture GlobalAlloc** now reads `(flags, sizeHigh, sizeLow)` correctly
+  (was allocating one paragraph by accident).
+
+## 4. Resume steps
+
+1. **No current boot blocker.** The plain 55k boot reaches Program Manager
+   with no fault, idle in KERNEL/USER (`1111:19E5` / `24F3:4A6E`), and renders
+   the complete Main, Accessories and Games groups
+   (`docs/screenshots/r5-progman-groups.jpg`). Place B reaches the same state
+   around 39M steps (`docs/screenshots/r7-studio-program-manager.jpg`), and
+   all 20 SETUP.INF apps render through the harness.
+   The earlier `1111:007B` fault was an intermediate group-WIP/timing state
+   and does not reproduce on either the current 164-file install or HEAD's
+   161-file install. Its mechanism, if it recurs, is KERNEL's INT 21h DS cache
+   word `1111:02DA` becoming zero: `19DF` loads DS=0, the dispatch table
+   read yields a zero handler, and `ret` lands at `1111:0000`; use
+   `tools/probe_next_dswatch.lua` to name the writer.
+   **Resolved red herring:** the old GDI `0000:2B4E`/`ADDATOM` fault was a
+   null HDC caused by the BIOS timer stub's `MOV AL,20h` clobbering AX; the
+   guest loader resolved `KERNEL.ADDATOM` correctly. See commit `da4c1a2`.
+2. **Timer-rate sensitivity.** `timerInterval=25_000` trips KERNEL's
+   critical-section reentry guard (`fatal 0x140`, `1111:64D6`); CALC then
+   shows "System Error — Terminating current application". Use
+   `--timer 55000` for every guest-code run and treat 25k results as
+   diagnostic only.
+3. **CALC (works).** `PATH` includes `C:\WINDOWS\SYSTEM`, so `WIN87EM.DLL`
+   opens instead of "Change Disk". After the timer EOI and signed-Jcc fixes,
+   CALC loads, runs and paints its complete Calculator window
+   (`tools/out/raster-jccfix-calc.png`). The only cosmetic issue is a few
+   green stripes in the leftmost button icons; investigate the embedded icon
+   planes if it matters.
+4. **Program groups (works).** `tools/install.lua` + `tools/win_group.lua`
+   generate `MAIN.GRP`/`ACCESSOR.GRP`/`GAMES.GRP` from SETUP.INF, embed real
+   NE icons and list the full `C:\WINDOWS\*.GRP` paths in `PROGMAN.INI`. The
+   164-file install opens/reads all three group files and Program Manager
+   draws Main (File Manager, Control Panel, Print Manager, Clipboard, Setup,
+   Read Me) with Accessories/Games minimized.
+5. **WRITE (works).** The "Insufficient memory" dialog was a false report:
+   `INT 21h AH=47` returned with `AL` still `'A'` from the caller, WRITE's path
+   helper scans for the NUL terminator using `AL`, wrapped the segment and took
+   its startup-error path. DOS returns `AX=0x0100` (AH=1, AL=0); fixed in
+   `core/Dos.lua`. WRITE now renders its full window
+   (`tools/out/write-fix-write.png`). The heap was never exhausted (~375 KB
+   free), so the AH=4B reservation is not the problem. The host static loader
+   still cannot eagerly map WRITE's 79 segments; the live KERNEL path
+   demand-loads only the preloaded ones.
+6. **CALENDAR / REVERSI / CLOCK (work).** CALENDAR/REVERSI were failing on
+   `USER.LoadBitmap`/`LoadCursor` for VGA.DRV resources above 64K: a child PSP
+   closed inherited JFT handles that KERNEL still owned. `AH=3E` now keeps the
+   owner's handle when a different PSP closes the shared entry. CLOCK spun in
+   its wait-for-second-change loop because `INT 21h AH=2C` was frozen at noon;
+   it now advances from the BDA tick. All three render at 20M steps.
+7. **Mouse/keyboard (done).** PS/2 INT 15h/C2xx, IRQ12/C207 delivery and the
+   Roblox pointer mapping are complete. MOUSE.DRV moves two pixels per PS/2
+   count, so `Machine.setMouse` sends half-counts with a remainder and tracks
+   the host pointer 1:1. The 8042 keyboard controller latches port 0x60
+   make/break codes, raises IRQ1, and chains to a real BIOS INT 9 stub.
+   Verified in Lune: Program Manager File menu via mouse, Notepad
+   `hello world` + `Hello, World!` via keyboard, Shift, typematic repeat,
+   Alt+F menu, and Calculator `1 + 2 = 3` via keyboard. Studio Play also
+   opens the Program Manager File menu from host Alt+F
+   (`docs/screenshots/r6-studio-keyboard.jpg`). The client now polls the
+   pointer every Heartbeat with the GUI inset, recomputes the sink rect each
+   frame, hides the host arrow for the whole VDM window, and uses
+   `MouseBehavior.LockCurrentPosition` plus GetMouseDelta in Studio so a
+   PrintWindow capture shows one guest cursor; the Tetris OK-button click
+   dismisses the About box at guest (320,369).
+8. **R5 (done):** kernel `LoadModule`/`TaskDB`, real Program Manager with
+   Main/Accessories/Games groups, all 20 SETUP.INF apps, and keyboard/mouse
+   input. Remaining polish: icon-plane colour artifacts and group-label
+   spacing.
+9. **R6 (real mode):** Windows 3.0 app matrix; **PhotoStyler 1.1a** is the
+   "Photoshop-class" flagship (24-bit, masks, filters, scanner input; tested in
+   Windows 3.0a real mode). Microsoft Tetris 2.0 is playable (Game > New, level
+   1, falling/stacked pieces, keyboard control) with the Timer/IF fix below.
+   Remaining: Tetris score/level/lines value backgrounds (red digits are drawn
+   but their black text backgrounds are one cell right), EMS, Sound Blaster/
+   AdLib and multi-MB scratch-disk support. Paintbrush/PC Paintbrush are
+   fallbacks. See `docs/PHOTOSHOP.md`.
+10. **R7 (286 track, in progress):** run
+   `lune run media/win31/probe31.lua --steps 400000` (probe defaults to
+   `cpuLevel=286`, 4 MiB). Current measured result: WIN.CNF passes HIMEM/CPU,
+   runs WSWAP, EXECs and unpacks DOSX, builds/copies its GDT, enters PM at
+   `0078:0B0E`, runs `LLDT/LTR`, IRETs to ring 3 (`0x5B:0xB51`), calls the
+   0xCB gate into ring 0 at `0078:0C5D`; the all-zero LIDT selects the
+   compact callback IDT at 0x110470/0x3F and INT3 enters the `0078:0C63`
+   switch helper. The helper clears CR0.PE and `LJMP 3838:0C7D` reloads real
+   CS; 4M/8M runs complete with no fault (4M PC=`3838:1C21`, 8M
+   PC=`3838:34C2`, PE=0). At 64M it is still in the loader's
+   KRNL286/KRNL386 path-search loop (`3838:1C7F`); AH=43 finds
+   `C:\WINDOWS\SYSTEM\krnl286.exe`, but the switch helper returns to
+   `3838:0078` (INT3 saved CS popped as IP). The real callback frame is
+   `3838:0C13` at DS:0x0F0; `0C7C` is not the return. The call-gate/INT3
+   frames are correct; `[0x134]=2` selects the 286 callback frame on the
+   SS=004B stack at SP~0x00F2, but `0053:0FE3` switches to SP=0x42B0 and runs
+   `005B:0340` with PE=1. Forcing PE=0/SS=004B/SP=0x00F2 makes the guest
+   exit at step 75,238 (no KRNL286), so `0340` is PM code. `0B9A` pushes the
+   outer 0C13 frame on SS=004B; `148F` starts a nested 0x42B0 stack and never
+   uses it; GDT[0] is correctly null, only selector 0x18 is a real-mode
+   alias. The 286 reset path now runs; DOSX EXECs KRNL286.EXE. The KRNL286
+   DS=0 fault at `02EF:1CFE` is fixed by correct VERR/VERW semantics: DOSX's
+   API 0x0A alias creation now succeeds, KRNL286's `CS:0x30` becomes `02E7`
+   and `CS:0x32` becomes `009B`. The DOSX callback frame is also green:
+   outer-ring `RETF` now restores `027F:01F8` before `148F`, so the `14E1`
+   epilogue IRETs to KRNL286 at `02EF:9A19`. The next first fault is
+   `02EF:728C` (`#GP: es selector FB00`, PE=1) from `MOV ES,[BP-4]` with
+   `[BP-4]=FB00` after the `0053:2197` DOSX callback.
+   The `--cpu 386` branch is WIN386 enhanced mode (WIN386.EXE; first blocker
+   `1110:5A66` unhandled INT 05), not KRNL386, so R7 stays on the 286 path.
+   Photoshop 2.5 remains the north star; 386 Enhanced mode is later.
+
+## 4a2. Boot status at 10M steps (verified)
+
+WIN.COM -> WSWAP -> DOSX (PM switch, GDT/LDT/IDT, ring 3) -> KRNL286 EXEC ->
+KERNEL initializes (197 exports, DGROUP allocated, heap init) -> runs 10M+
+instructions without faulting. File opens logged: DOSX.EXE, WSWAP.EXE,
+SYSTEM.INI, KRNL286.EXE, CON (x5). No INT 10h mode changes yet (still text
+mode 3). No GDI/USER module loads yet.
+
+The kernel is likely doing internal PM initialization (task database,
+module table, selector management) that takes many instructions. Next:
+trace the kernel's execution to find whether it's in a wait loop or
+progressing through init. Use `tools/sample.lua` for hot spots.
+
+## 4b. FB00 fault - verified context (R7 resume point)
+
+Probe: `lune run media/win31/probe31.lua --steps 146000 --trace` (per-step trail
+prints at the end; media/ is git-ignored so probe edits stay local).
+`--trace-ed1` hooks were added too (KRNL286 02EF:0ED1/0EE9/0EF4/7289) but the
+ED1 offsets never fire in THIS boot - the helper that faults runs at a
+different KRNL segment layout each install; key probes on CS=02EF are wrong -
+use the trail instead.
+
+Verified fault context at step ~144000:
+- faulting instruction: `mov es, [bp-4]` loading **ES=FB00** with AX=FB00
+  (KRNL286 CS=02EF, base 0x8FDB0); ES=03F7 (a valid LDT selector) was fine
+  just before.
+- boot sequence right before: `EXEC C:\WINDOWS\SYSTEM\WSWAP.EXE` then
+  `EXEC C:\WINDOWS\SYSTEM\DOSX.EXE`; INT 2Fh 4300/4310 XMS calls healthy;
+  `OPEN FAIL EMMXXXX0` and `OPEN FAIL C:\WINDOWS\dosx.exe` (benign probes);
+  then `EXEC wswap.exe` (step ~8000).
+- FB00 is not in our arena (0x1100-0xA000) and not a valid GDT selector
+  (GDT limit 0x11F). It is almost certainly a REAL-mode segment DOSX hands
+  KRNL286 expecting its own PM alias - i.e. the missing piece is DOSX's
+  real-segment-to-selector alias creation (or the DOS response DOSX based
+  it on).
+
+Progress this pass: the full faulting helper is decoded (live dump via
+probe31's dump_krnl.bin hook). It is KRNL286's RM-file-read block helper:
+allocates an RM buffer segment, reads file data through the DOSX callback
+(`call 0x1994` = RM INT 21h dispatcher; AH=3F/42 visible at 0x72BF/0x730D),
+copies PM-to-PM, zeroes the remainder. The ES=FB00 value comes from
+`call 0x282F` (a tiny stub: decrements word [0x18], tests flag [0x38] bit0,
+and calls 0x8F96 when set) reached via `call 0x0DD1` -> `call 0x282F`. The
+0x8F96 callee is outside the dumped range (krnlBase+0x8F96 = the next
+candidate to dump/trace). Working hypothesis: word [0x18] is a nesting
+counter and [0x38] a "switch to real mode for this call" flag; the helper
+returns a REAL-mode segment FB00 that DOSX should alias, but the alias
+creation goes through 0x8F96 which our PM layer mishandles.
+
+Progress next pass: 0x8F96 is disassembled (live dump now covers the full
+KRNL286 segment, media/win31/dump_krnl.bin, plus DOSX PM code/data dumps).
+0x8F96 is DOSX's reflector: DS = cs:[0x30] (DOSX data), then tests status
+byte [0x328]:
+- bit 0x10 CLEAR in our boot -> falls into `int 1; iret`, popping garbage
+  (AX=FB00) -> KRNL286 loads ES=FB00 -> #GP. This IS the failure path.
+- bit 0x10 SET would take the `mov ax,0x63; lcall [0x310]/[0x308]` path
+  (DOSX RM service dispatch through data pointers).
+So DOSX's reflector status byte [0x328] (its data segment) is 0x00 at first
+CS=0x0053 sighting - the reflector never reports its PM hooks installed.
+Writers of [0x328] are NOT in the DOSX PM code segment (64KB scanned, only
+an accidental `je +3` match) - the writer is in DOSX's REAL-mode half, whose
+segment is not yet dumped.
+
+BREAKTHROUGH (next pass): 0x8F96 is KRNL286's **PM INT 1 (single-step)
+handler**. KRNL286 switches PM->RM by setting the trap flag and
+single-stepping; the INT 1 handler tests DOSX data [0x328] bit 4 (0x10):
+- SET: `mov ax,0x63; lcall [0x310]` - DOSX RM service dispatch completes
+  the mode switch (data table shows [0x310] = 01E0:1380, DOSX RM entry).
+- CLEAR (our boot): restores AX/DI/DS and chains via `int 1; iret` to the
+  next INT 1 handler - which in our boot returns garbage AX=FB00 into ES.
+
+## R7 status: 100M instructions NO FAULT
+
+The kernel runs 100M+ instructions with the stack-wrap fix for SS overflows
+during deep init. The screen is blank because Windows switches to graphics
+mode (0xA0000 framebuffer) — the text-mode ScreenSink at 0xB8000 doesn't
+render graphics. VGA graphics sink (EditableImage) is needed to see the
+desktop.
+
+Fixes that got here:
+- FB00: auto-alias (segBase = selector*16 for RM segments in loadSeg)
+- Stack overflow: wrap SS offsets within 16-bit segment (8086 behavior)
+- Null selector data access: return linear 0 instead of #GP
+
+BREAKTHROUGH 2 (live disassembly of loaded code): the faulting function
+(02EF:7214-0x737A) is KRNL286's RM file-read helper, DESIGNED to run in
+real mode. Verified code flow:
+1. `call 0x0DD1` (the "prepare RM switch" stub: decrements [0x18], tests
+   flag [0x38] bit0, calls 0x8F96 = the PM INT 1 handler when set).
+2. 0x8F96 = PM INT 1 (single-step) handler: tests [0x328] bit 4 (0x10):
+   SET -> `mov ax,0x63; lcall [0x310]` (DOSX RM service 0x63 completes the
+   PM->RM mode switch via 01E0:1380); CLEAR -> restore regs + `int 1; iret`
+   (chain to next INT 1 handler).
+3. The caller then loads RAW RM segments (ES=FB00, DS=FB00) and executes
+   `INT 21h AH=3F/42` via `call 0x1994` (the RM dispatcher) - all valid in
+   real mode, invalid in PM (which is why we #GP).
+4. After the read: copy RM buffer -> PM, zero remainder, return DX:AX.
+
+So KRNL286 EXPECTS the DOSX callback chain to switch the CPU to real mode
+before this code block runs (the whole helper is the RM half of a PM/RM
+file read). The bug: [0x328] bit 4 stays clear, so the INT 1 handler chains
+instead of switching.
+
+Next investigation steps:
+1. Find who sets [0x328] bit 4 (0x10): it is DOSX data, so the setter is
+   DOSX PM code. Scan the DOSX PM image (dump_dosx_full.bin) for writes -
+   the linear sweep missed it, so do a byte-pattern search for the encodings
+   (80 0E 28 03 / 80 4E 28 03 / 83 4E 28 03 / C6 46 xx via mov es:[di+X]
+   where X resolves to 0x328 - scan for `26 80 4e` and `26 80 0e` with
+   varying displacement, plus the 0x80/0x08 forms).
+2. Alternatively: check if KRNL286 sets bit 4 via a DOSX API call before
+   this code (trace all INT 21h/DOSX PM API calls with AX >= 0x60 in the
+   window between KRNL286 load and the fault; the flag setter is likely
+   DOSX service 0x0A "create data alias" or a sibling).
+3. Or brute-force: emulate bit 4 as always-set in our PM layer (temporary)
+   to see if the RM switch then completes and the file read succeeds -
+   this validates the hypothesis before hunting the exact setter.
+
+## 5. Known deviations (workarounds, not faked output)
+
+The guest runs genuine Microsoft binaries; nothing below hardcodes a success
+message or skips guest code. These are emulator accommodations/partials:
+
+- **EXEC load-high (bound NE only):** `AH=4B` still places a *bound NE* image
+  at the top of its block (plus the reserved self-relocation area and heap),
+  which keeps 3.0a KERNEL's loader/stack apart. Plain MZ images now load at
+  the real DOS address `PSP+0x10`; EXEPACK-packed DOSX computes that segment
+  itself and rejects load-high as "Packed file is corrupt".
+- **File attributes/timestamps:** `AH=43` reports archive/directory
+  attributes; `AH=57` returns a fixed 1990-01-01 12:00. No real attribute or
+  timestamp model yet.
+- **VFS:** a partial `SETUP.INF` install, not a full Windows setup. Missing
+  files surface as real DOS errors.
+- **Studio boot bundle:** `tools/pack_winboot.lua` packs WIN.COM/KERNEL,
+  drivers/fonts, the generated groups and all 20 built-in app executables into
+  `fixtures/WinBoot*.lua` (git-ignored). It also carries SETUP.EXE/SETUP.INF,
+  README.TXT, WINVER.EXE, DIGITAL.FON and CONTROL.INI so the non-DOS Main-group
+  items resolve. `COMMAND.COM` is not on the Windows media, so the DOS Prompt
+  item still reports "Cannot find file" by design.
+- **Display:** text mode uses the text sink; graphics modes switch the client to
+  `VgaSink`/`EditableImage`. VGA.DRV paints the real Program Manager desktop in
+  Lune (`tools/out/clean55k-win.png`) and Studio
+  (`docs/screenshots/r7-studio-program-manager.jpg`). NE4/KERNEL output is real
+  guest output, not a mock.
+- **Hardware:** INT 67h reports no EMS. XMS 3.0 is present on 286+ (INT 2Fh
+  4300/4310, A20, HMA, EMBs, 0Bh moves); 8086 mode reports no XMS so the 3.0a
+  path is unchanged. The 8042 keyboard and 1:1 PS/2 mouse are implemented. The 8254 channel 2 divisor and port 0x61 speaker
+  gate are modelled; the host beep is optional. Sound Blaster/AdLib, printer and
+  serial backends are not implemented. IRQ0 is
+  instruction-counted (`config.timerInterval`, default 55k ≈ 18.2 Hz at ~1M
+  instr/sec), not wall-clock PIT timing. The app harness's old 25k default is
+  diagnostic only and trips KERNEL's reentrancy guards; use `--timer 55000`.
+- **DOS:** `AH=4B` AL=3 overlays and some lesser INT 21h calls are still
+  unimplemented and fail loudly.
+- The old `C:\WINDOWSKERNEL.EXE` duplicate path workaround is gone. WIN.COM
+  needs the trailing `windir` separator; child environments are normalized to
+  drop it before KERNEL's profile code appends its own.
+
+## 6. Lessons (do not re-learn)
+
+- Register table `r[1..8] = AX CX DX BX SP BP SI DI`; **`r[5]` is SP**;
+  `cpu:wr(n)` is 0-indexed (`wr(3)=BX`, `wr(4)=SP`); `cpu:wb(n)` is
+  `AL CL DL BL AH CH DH BH`, so AH is `wb(4)`, not `wb(1)`.
+- **INT 21h AH=62 returns BX=PSP**, not AX. WSWAP reads BX, stores it as its
+  top-of-memory segment, and then zero-fills a range derived from it; returning
+  only AX made it zero all of low RAM and wipe WIN.CNF.
+- **XMS 09h returns the handle in DX** (AX=1 status). `INT 21h AH=62` and the
+  XMS return conventions are easy to swap because both use different registers
+  than the obvious ones.
+- **XMS 0Bh handle 0 offsets are segment:offset DWORDs**, segment in the high
+  word, not linear addresses. WSWAP builds them that way and rejects linear
+  interpretation.
+- **EXEPACK computes its own load segment as PSP+0x10.** Loading DOSX high
+  makes its decompressor print "Packed file is corrupt"; only bound NE may be
+  load-high.
+- **Protect F100:0000-0FFF on 286+.** WSWAP zero-fills free RAM from its PSP
+  upward; without the write guard it erases the IVT/timer/XMS stubs while the
+  IVT still points at them. 3.0a keeps the old writable behaviour.
+- **PUSH imm8 must sign-extend only 0x80..0xFF.** Adding 0xFF00 to every byte
+  turned DOSX's `push 0x58` GDT parameter into 0xFF58; the descriptor builder
+  then masked it to an offset past the GDT and silently left the table zero.
+- **XMS 0Bh owns A20 during the move.** DOSX disables the guest A20 gate,
+  copies its GDT into an EMB, then re-enables A20. Applying the guest gate to
+  the XMS copy folds the destination below 1 MiB and the GDT never lands.
+- DOSX builds the GDT in conventional memory at segment 0x38B8 (physical
+  0x38B80), then copies it with XMS 0Bh to EMB offset 0. The GDTR base is
+  derived from the EMB lock address + 0x800.
+- Once `LMSW` sets PE=1, a selector cannot be used as a paragraph. Segment
+  loads validate the GDT/LDT and name the selector on `#GP`; the LJMP
+  `0078:0B0E` resolves to base 0x49190 (the loader's real-mode code segment).
+- A selector whose descriptor access is `E4` is a present 286 **call gate**
+  (type 4), not a code segment. DOSX's first ring-3 call uses selector 0xCB;
+  `loadSeg` still rejects gates, but `farCall` decodes them.
+- 286 call gate layout: offset low at +0, target selector at +2, parameter
+  count at +4 (low 5 bits), access at +5, offset high at +6. DOSX's gate 0xCB
+  targets `0078:0C5D` with 0 parameters.
+- TSS 0x88 base 0x34220: SP0 at +2 = 0x30A8, SS0 at +4 = 0x68. The nested
+  ring-0 frame is `IP,CS,FLAGS,old SP,old SS,params` from the final SP upward;
+  outer IRET pops all five words. DOSX's frame lands at SP=0x309E.
+- The gate target executes `LIDT [DS:0x2A31]` then `INT3`. At that point
+  DS=0x4B/base 0x340D0 and the six operand bytes are all zero, so a literal
+  load sets IDTR=0/0. The all-zero operand is an uninitialised copy; the
+  real-callback table is the compact 8-entry IDT at liveBase+0x470
+  (`0x110470`, limit 0x3F). `loadTable` selects it and patches vector 3 to
+  `0078:0C63`; later zero LIDTs keep the compact table. Documented DOSX
+  recovery, not real 286 semantics.
+- `0078:0FE3` is **not** the switch helper; it is a different routine ending
+  in `POP DS`, which pops the INT3 frame's saved IP. The `LIDT` at 0C5D is
+  5 bytes, so `INT3` is at 0C62 and the saved IP is `0x0C63` — a code offset,
+  not a selector; loading it as DS faults at `0078:0FF1`. The real helper is
+  `0078:0C63`: `PUSH DX; PUSH EAX; MOV DX,CS:[0]; MOV EAX,CR0; AND AL,FE;
+  LIDT [0x122]; MOV CR0,EAX; LJMP 3838:0C7D; MOV SS,DX; MOV DS,DX;
+  MOV ES,DX; POP EAX; POP DX; RET`. It clears CR0.PE (CR0 1 -> 0) and reloads
+  real CS (base 0x38380); 4M/8M runs end at `3838:1C21`/`3838:34C2` with
+  PE=0 and no fault. Do not special-case 0x3838/0x0C63; they are real-mode
+  paragraphs from the callback.
+- The 64M run is still in the loader's KRNL286/KRNL386 search loop:
+  `3838:0098` (physical 0x38418) -> path parser `3838:1C0C`; `INT 21 AH=43`
+  misses `C:\WINDOWS\krnl286.exe` and finds `C:\WINDOWS\SYSTEM\krnl286.exe`;
+  `INT 21 AH=4A` resizes; `LJMP 0053:0BF` enters the PM callback.
+- **386 diagnostic branch (`--cpu 386`, not committed):** `WIN.CNF` EXECs
+  **`WIN386.EXE` (544,789 bytes)**, not DOSX/KRNL386. At step 4000 it faults
+  at `1110:5A66`: unhandled interrupt 05 (zero IVT entry), `CR0=0`, real
+  mode, CS=`1110` base `0x11100`, IP inside ASCII data (`"m but may occasi"`),
+  DS/SS=`142E`, ES=0, GDTR/IDTR 0. `--cpu 386 --force286` loads DOSX but
+  faults with unhandled INT3 at `0000:0085` (real mode, CS=0). The 386
+  branch is WIN386 enhanced mode, not the KRNL386 standard-mode target; R7
+  stays on the 286 path.
+- Exact frame at the second helper return (`3838:0C86`, SS=340D base
+  0x340D0), SP=0x3098:
+  `[0C63, 0078, 0046, 0C05, 005B, 0046, 3068, 004B]`.
+  INT3 frame at 0x3098 is `IP=0C63, CS=0078, FLAGS=0046`; the call-gate frame
+  at 0x309E is `IP=0C05, CS=005B, FLAGS=0046, oldSP=3068, oldSS=004B`.
+  Helper push/pop widths are balanced (2+4 then 4+2). The first near RET pops
+  0C63; the second pops saved CS `0078` as IP, leaving FLAGS. The extra frame
+  is the 3-word INT3 frame; it is not a push32/pop32 bug.
+- The real callback return is **`3838:0C13`**, not `0x7C`. At DS:0x0F0
+  (physical 0x341C0): `340D 0C13 3838 0046 ...`, far return `3838:0C13`
+  with DS=0x340D. `0C13` restores the PIC/IVT and RETs. `0x7C` is only the
+  instruction after `LJMP 0053:0004` at `3838:0077`.
+  Diagnostic RET-target patches: `0C7C` exits at step 75,415 (no KRNL286);
+  `0C13` continues (4M PM `005B:0B92`, 8M RM `3838:00CC`, 16M RM
+  `3838:34C3`); `0C05` faults at `0000:0085`. Do not special-case
+  0x78/0x7C/0C13.
+- Handoff trace: `005B:359B` self-copy runs with CS base `0x49190`,
+  DS=`005B`, ES=`004B`, SI=`35EC`, DI=`789C`, CX=0; it copies `0x35EC` bytes
+  from loader CS:0, patches GDT descriptors at ES:[0x58]/ES:[0x78], then
+  `LJMP 005B:35BD`. Later `005B` CS base is `0x38380` (relocated loader).
+  - `005B:0C00` gate stack `[0C05,005B,0046,oldSP,oldSS]`; DS:0x0F0 =
+    `340D 0C13 3838 0046 35CF 2C70`.
+  - `0053:0FE3` entry stack `[0C63,0078,0046,0C05,005B,0046,oldSP,004B]`;
+    `148F` adds `0FE6`, sets SS=`004B`/SP=`[0x100]`, then `14DC`
+    `LJMP 005B:0340` with PE=1.
+  - `005B:0340` calls `0B61`, which re-enters the 0C00 gate; stack descends
+    `42AC -> 412C -> 3FAC ...`, then `0367` sets ES=0 and `036B` faults at
+    `005B:036F` reading IVT INT 91.
+  - The `0C63` path breaks recursion by clearing PE, but uses the INT3 frame
+    and returns to `0x78`, never consuming the DS:0x0F0 `0C13` frame.
+  - Call-gate and INT3 frames are correct; this is a guest callback
+    frame/mode-switch mismatch, not a CPU stack-width bug.
+- Diagnostic only (compact vector 3 restored to `0053:0FE3`): the first
+  fault is `005B:036F`, `#GP: es selector 0000 offset 0246 size 2 exceeds
+  limit 0000`, PE=1, ES=0, BX=0244. Faulting instruction is
+  `MOV AX,ES:[BX+2]` at `005B:036B` (IVT INT 91), reached via
+  `0053:14DC LJMP 005B:0340` with PE still 1; that callback body expects
+  real mode. Not committed.
+- `0x66` is treated as an operand-size prefix at `cpuLevel>=286` because this
+  DOSX helper uses `66 50`/`66 58`; `push32`/`pop32` move SP by 4 and push
+  the low word first.
+- Signed Jcc compares `SF ~= 0` vs `OF ~= 0`, never `band(flags,SF)` vs
+  `band(flags,OF)`: the mask values 0x80 and 0x800 are unequal even when both
+  flags are set.
+- INT 21/10/16 handler flags must reach the guest. The emulated IVT stubs
+  dispatch inline while they still point at the stub; never let the stub's
+  IRET restore the pre-call flags (DOS reports errors via CF).
+- Studio: the `core` deploy chunk updates child ModuleScripts but not the
+  `Vdm` root's `init.lua` Source; run `studio_deploy.lua reinit` after editing
+  `core/init.lua`, then redeploy the tree.
+- DOS AH=47h returns cwd WITHOUT drive, WITH trailing backslash.
+- WIN.COM scans the environment for lowercase `windir=` and joins the value
+  directly with `kernel.exe` — the value needs the trailing backslash.
+  Children (KERNEL and below) must get it WITHOUT the slash: KERNEL's profile
+  code appends its own, and a doubled slash silently reverts every
+  SYSTEM.INI lookup to defaults.
+- `PATH` must include `C:\WINDOWS\SYSTEM`; the real-mode loader finds
+  WIN87EM.DLL and friends through it.
+- INT 8 (IRQ0) must never fire inside the `0xF100` stub region.
+- Maskable IRQs (IRQ0/1/12) must honour IF. Delivering while the guest is in a
+  `CLI` critical section saves IF=0 in the frame; the handler's IRET then leaves
+  interrupts disabled forever. Keyboard and mouse dispatchers now check IF just
+  like `advanceTimer`.
+- The inline chained-stub path in `Cpu.interrupt` must preserve the caller's IF
+  bit when it writes the handler's result flags into `[SP+4]`. A guest INT 2Fh
+  handler can jump into our stub, whose `INT 9Ch` would otherwise copy the
+  cleared IF into the outer frame; Windows then idles with IF=0 and no
+  WM_TIMER (blank Tetris board).
+- PC speaker: channel 2 is programmed through 0x43 (control) then 0x42
+  (lo/hi divisor); port 0x61 bits 0+1 gate it. Tetris writes only 0x61 bit 7
+  (A20), so do not treat every 0x61 write as sound. `speakerState()` is a
+  host poll; the guest remains authoritative.
+- Tetris score boxes: the red digits are VGA index 12 at x≈41 and the opaque
+  black text backgrounds are at x≈51, one character cell right. VGA.DRV fill
+  PCs 0D87:1AE5/1DF7 issue the black background after the glyph writes; the
+  DAC/attr palette is normal EGA. This is a GDI text-alignment/background-rect
+  or child-window paint-order issue, not black-on-black text or a palette
+  swap. Do not "fix" it by writing fake digits into the framebuffer.
+- Roblox input spaces: `InputObject.Position`/`AbsolutePosition` exclude the
+  topbar inset; `GetMouseLocation` includes it. Poll with `GetMouseLocation` -
+  `GuiService:GetGuiInset()` and re-read AbsolutePosition/Size every frame. In
+  Studio, `MouseIconEnabled=false` does not hide the editor's OS arrow; use
+  `MouseBehavior.LockCurrentPosition` and drive the guest from `GetMouseDelta`.
+- The BIOS INT 8 EOI stub must preserve AX (push/pop). The guest KERNEL ISR
+  chains to it with live caller results; clobbering AL turned a valid GDI HDC
+  into a null handle and produced a misleading `0000:842C` fault.
+- HLT is an idle wait, not an exit. A harness that stops on `cpu.halted` will
+  freeze Windows at its idle loop; `run()` wakes it on the next PIT tick.
+- `timerInterval=25_000` is a diagnostic accelerator, not a faithful PIT:
+  it fires early enough to hit KERNEL's critical-section reentry guard
+  (fatal 0x140). Guest-code runs use 55k.
+- Windows-internal INT 21h probes (`AH >= B0`) fail gracefully; never abort.
+- MCB chain invariant: `next.start == prev.start + prev.size + 1`; allocations
+  split with a one-paragraph MCB gap.
+- SFT entry stride is 59 bytes; the `CON` name sits at entry+0x1E; AH=52's
+  pointer is the first-DPB field (`[BX-2]` MCB, `[BX+4]` SFT, `[BX+22h]` NUL).
+- Bound NE: the MZ stub maps the whole file at `CS-0x20` and jumps to the NE
+  entry; relocations are the loader's job.
+- Pascal argument convention: first argument at `SS:SP+6`; a far pointer word
+  order is offset then segment; `GlobalAlloc` reads flags, sizeHigh, sizeLow.
+- Lune: `process.exec(program, params, options)`; `process.args` is a table.
+- Lune heredocs via bash mangle backslashes — use the Write tool.
+- Studio: string-path requires (`./`, `@self`) disabled in this build; use
+  service roots and index modules. `SurfaceGui.AlwaysOnSurface` no longer
+  exists. `get_console_output` can lag — verify with fresh probes.
+- `EditableImage:WritePixelsBuffer` requires the buffer length to be exactly
+  `regionWidth * regionHeight * 4`. Reusing a larger dirty-region buffer
+  silently fails; VgaSink resizes on any length mismatch.
+- `tools/pack_winboot.lua` must use the same INI rules as
+  `Install.writeSystemIni`; otherwise the Studio boot has an empty shell or
+  the NETWORK.DRV fallback. It now calls the install helper through a tiny
+  fake VFS. Include `PROGMAN.EXE` (WinBootApps) or KERNEL exits after USER.
+- The Studio boot also needs every group target in the VFS. `WinBootBig`
+  carries CALC, WINFILE, NOTEPAD, MSDOS and the rest of the built-in fleet;
+  packing only PROGMAN.EXE makes every group icon report "Cannot find file".
+
+## 7. Style/tooling
+
+- `STYLE.md` is the contract; `stylua.toml`, `selene.toml`,
+  `selene_roblox.toml`, `rokit.toml` enforce it.
+- `lune run tools/check.lua` runs every gate locally and in CI
+  (`.github/workflows/ci.yml`).
+- Generated artifacts are ignored: `Vdm.rbxmx`, `tools/deploy_args.json`,
+  `tools/memdump.bin`, `media/`, `tools/bin/`.
