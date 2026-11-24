@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.1
+
+- Windows 3.1 standard mode resumes after the MS-DOS Prompt: the swap-in
+  restores the KRNL286 block that DSWAP was handed (`core/Dos.lua`, test
+  `dos_swap_in_restores_the_kernel_block_dswap_was_handed`).
+- The emulator window stays centred in Studio: it is sized from the desktop
+  frame and refitted when that frame resizes.
+- Test suite: 1017 assertions, gate green.
+
 ## v0.8.0
 
 Windows 3.0a (real mode) is feature complete for its scope: Program Manager,
