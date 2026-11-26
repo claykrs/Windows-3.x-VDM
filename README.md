@@ -1,4 +1,4 @@
-# RVDM — Windows 3.0a in a Roblox window
+# Windows 3.x VDM — Windows 3.0a running inside Roblox
 
 [![CI](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/Windows-3.x-VDM) ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -9,7 +9,17 @@ Manager appears at 640×480 in an emulated VGA (mode 12h) framebuffer. Nothing
 on screen is mocked: every window and pixel is the original 16-bit guest code
 executing on the emulated CPU.
 
-![Program Manager with the Main group open and Accessories/Games minimized](docs/screenshots/r5-progman-groups.jpg)
+![Windows 3.0a Program Manager running inside the emulator](docs/images/hero.png)
+
+| | |
+| --- | --- |
+| ![Calculator](docs/images/calculator.png) | ![Solitaire](docs/images/solitaire.png) |
+| *Calculator* | *Solitaire* |
+| ![Paintbrush](docs/images/paintbrush.png) | ![File Manager](docs/images/file-manager.png) |
+| *Paintbrush* | *File Manager* |
+
+Every screenshot is the real Windows 3.0a code running on the emulated CPU and
+VGA; nothing on screen is drawn by the host.
 
 ## Verified state
 
@@ -34,11 +44,10 @@ executing on the emulated CPU.
 - The gate `lune run tools/check.lua` passes: stylua, selene (luau + roblox),
   `luau-analyze --mode=strict`, and 1015 test assertions.
 
-![MS-DOS Executive listing the real c:\windows directory](docs/screenshots/r6-msdos-executive.png)
-
-![Notepad after typing through the emulated 8042 keyboard](docs/screenshots/r6-notepad-keyboard.png)
-
-![Tetris 2.0 in the Studio host window](docs/screenshots/tetris-playfield.png)
+| | |
+| --- | --- |
+| ![Notepad after typing through the emulated 8042 keyboard](docs/screenshots/r6-notepad-keyboard.png) | ![Tetris 2.0 in the Studio host window](docs/screenshots/tetris-playfield.png) |
+| *Typing in Notepad through the emulated keyboard* | *Microsoft Tetris 2.0* |
 
 ## Architecture
 
