@@ -1,4 +1,4 @@
-# HANDOFF — RVDM (8086 DOS machine → Windows 3.0a in Roblox)
+# Engineering log — RVDM (8086 DOS machine → Windows 3.0a in Roblox)
 
 Resume here after context compression. Everything below is verified state as
 of the R7 pass: all 20 SETUP.INF applications still render in Windows 3.0a,

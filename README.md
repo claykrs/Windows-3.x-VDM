@@ -7,8 +7,7 @@ Microsoft Windows 3.0a binaries inside Roblox. `WIN.COM` loads `KERNEL.EXE`,
 the drivers and fonts, then `GDI.EXE` and `USER.EXE`, and the real Program
 Manager appears at 640×480 in an emulated VGA (mode 12h) framebuffer. Nothing
 on screen is mocked: every window and pixel is the original 16-bit guest code
-executing on the emulated CPU. The public repository is
-<https://github.com/claykrs/Windows-3.x-VDM>.
+executing on the emulated CPU.
 
 ![Program Manager with the Main group open and Accessories/Games minimized](docs/screenshots/r5-progman-groups.jpg)
 
@@ -23,12 +22,9 @@ executing on the emulated CPU. The public repository is
   Per-app matrix and NE header facts: [docs/APP_COMPAT.md](docs/APP_COMPAT.md).
 - Microsoft Tetris 2.0 (Windows Entertainment Package: `TETRIS.EXE`,
   `ABOUTTET.DLL`, `WIN87EM.DLL`) runs, including live in Roblox Studio.
-- Input is emulated hardware, not LED fakes: an 8042 keyboard (set-1 make/break
-  scan codes, typematic repeat) and a PS/2 mouse (IRQ12/C207, half-count
-  2 px-per-count contract with re-anchoring plus a measured +58 px Y-bias
-  compensation). Verified: Alt+F menus, Notepad typing, Calculator keypad, and
-  a fully synthetic mouse click dismissing Tetris' About dialog in a live
-  Studio boot.
+- Input goes through emulated hardware: an 8042 keyboard (set-1 scan codes,
+  typematic repeat) and a PS/2 mouse. Menus, typing in Notepad, the
+  Calculator keypad and mouse clicks all work in a live Studio boot.
 - PC speaker: the 8254 channel-2 divisor (ports 0x43/0x42) and the port 0x61
   gate are modelled; the host replays an optional short beep on state changes.
 - MS-DOS Prompt runs: the Main group item launches `WINOLDAP`, the grabber and
@@ -59,7 +55,7 @@ and inside Roblox (client-side only — the server has no role in emulation).
 | `fixtures/` | NE4 test fixture, `Kernel16`, generated `WinBoot*.lua` boot bundles (git-ignored) |
 | `tests/` | `CpuTests`, `PmCpuTests`, `XmsTests`, `MachineTests`, `DosTests`, `GroupFileTests` |
 | `tools/` | `extract`, `stage`, `pack_winboot`, `build_rbxmx`, `install`, `app_harness`, `check` |
-| `docs/` | `APP_COMPAT.md`, `PHOTOSHOP.md`, `R7-PLAN.md`, `R7-CALLBACK.md`, `screenshots/` |
+| `docs/` | `APP_COMPAT.md`, `ENGINEERING-LOG.md`, `STYLE.md`, `screenshots/` |
 
 Machine internals:
 
@@ -75,9 +71,9 @@ Machine internals:
   is the VGA framebuffer: an `EditableImage` sink updated per dirty rectangle,
   falling back to a coarse 32-column Frame grid when Mesh/Image APIs are off.
   Keyboard input enters through an 8042 port model as set-1 scan codes. The
-  framebuffer is authoritative; a native ScreenGui mapping was prototyped and
-  rejected because USER/GDI owner-draw, bitmap fonts and BitBlt cannot be
-  reproduced without reimplementing the GUI (see `roblox/gui/FEASIBILITY.md`).
+  framebuffer is authoritative: a native ScreenGui mapping was prototyped and
+  rejected, because USER/GDI owner-draw, bitmap fonts and BitBlt cannot be
+  reproduced without reimplementing the GUI.
 
 ## Running it
 
@@ -176,46 +172,20 @@ Application compatibility is verified with the harness and documented in
 
 ## In progress: Windows 3.1 standard mode
 
-The 286 protected-mode track (real `DOSX.EXE` + `KRNL286.EXE`) is actively
-being finished. Where it stands:
+The 286 protected-mode track runs the real `DOSX.EXE` and `KRNL286.EXE`:
 
-- **Done:** the PM core (GDT/LDT/IDT/TSS, expand-down data segments, ring
-  transitions, PM↔RM switching with full state save/restore), the XMS driver
-  (top-first allocation), and the boot chain — `WIN.COM` EXECs WSWAP and
-  DOSX cleanly, DOSX claims extended memory, relocates its PM image, and
-  KRNL286 executes in protected mode.
-- **Solved arcs R9-R12:** LAR/LSL ZF semantics (`6557b2e`), guest MCB-chain
-  coherence (`f2ef54e`), DOSX-resident terminate-vs-continue (`3091c20`),
-  the IRET pmSaved restore (re-read segment caches via `loadSeg`, drop the
-  `csSel<<4` alias stomp, `78433f7`), and the missing PE gate on the
-  pmSaved branch (`706d5cb`) plus INT 21h AH=4D. The boot now passes its
-  old 168k wall and runs **4M steps fault-free**: DOSX EXEC'd, KRNL286
-  EXEC'd, and KRNL286's protected-mode phase running with WIN.COM's second
-  stage alive.
-- **Now:** the boot reaches a drawn Program Manager in standard mode
-  (about 38M steps) and the apps load. MS-DOS Prompt launches through
-  WSWAP/DSWAP, shows the stand-in `C:\>` prompt and returns on `exit`
-  (fixes: DSWAP's memory check, `INT 21h AH=4A` grow, drive types for the
-  swap file). **Open:** Windows faults when it resumes after the swap-in
-  because the kernel block DSWAP now owns is not part of the swap file;
-  options and evidence are in HANDOFF.md (R15).
-
-Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
-[docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
-targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
-
-Planning and callback research: [docs/R7-PLAN.md](docs/R7-PLAN.md),
-[docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
-targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
+- The protected-mode core (GDT/LDT/IDT/TSS, expand-down segments, ring
+  transitions, real↔protected mode switching) and the XMS driver are done.
+- The boot reaches a drawn Program Manager in standard mode and the apps load.
+- MS-DOS Prompt launches through WSWAP/DSWAP and returns on `exit`.
+- Open: Windows can fault when it resumes after a swap-in. Details are in the
+  [engineering log](docs/ENGINEERING-LOG.md).
 
 ## Roadmap
 
 - **Windows 3.0a real mode:** EMS, demand segment loading, printer/serial
   backends and the remaining cosmetic fixes.
-- **Windows 3.1 standard mode (286 protected mode):** in-progress R&D on the
-  DOSX/KRNL286 bring-up. It boots to Program Manager; MS-DOS Prompt resume is open; see
-  [docs/R7-PLAN.md](docs/R7-PLAN.md) and
-  [docs/R7-CALLBACK.md](docs/R7-CALLBACK.md). This is the track Photoshop 2.5
-  targets ([docs/PHOTOSHOP.md](docs/PHOTOSHOP.md)).
+- **Windows 3.1 standard mode (286 protected mode):** boots to Program
+  Manager; MS-DOS Prompt resume is the open item.
 - **386 enhanced mode** (paging/V86/VxD) is a later track for the wider 3.1
   software library.

@@ -61,3 +61,6 @@ tools/test_conn.json
 tools/*.json
 tools/*.png
 tools/studioDeploy.lua
+
+# local editor / MCP configuration
+.mcp.json

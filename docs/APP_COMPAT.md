@@ -273,7 +273,7 @@ The 640K real-mode wall is now the limiting factor, not the boot chain:
    icon, but `COMMAND.COM` is a DOS file and is not on the Windows media.
    Staging a real DOS 5.0 command interpreter unlocks it.
 4. **Third-party media matrix.** Word 1.x, Excel 2.x and PhotoStyler 1.1a are
-   the next real-mode targets; see section 3 and `docs/PHOTOSHOP.md`.
+   the next real-mode targets; see section 3.
 5. **Real-mode resource budget.** USER/GDI heaps are 64K each in real mode;
    group files and `RUN=`/`LOAD=` entries compete for them (KB Q65452). The
    standard three groups load together; keep `RUN=`/`LOAD=` empty while
