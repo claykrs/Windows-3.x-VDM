@@ -1,6 +1,6 @@
-# Windows 3.x VDM — Windows 3.0a running inside Roblox
+# roblox-win3-emulator — Windows 3.0a running inside Roblox
 
-[![CI](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/Windows-3.x-VDM/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/Windows-3.x-VDM) ![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/roblox-win3-emulator) ![License](https://img.shields.io/badge/license-MIT-blue)
 
 RVDM is an 8086 real-mode PC emulator written in Luau that boots the real
 Microsoft Windows 3.0a binaries inside Roblox. `WIN.COM` loads `KERNEL.EXE`,
@@ -106,7 +106,7 @@ are diagnostic only.
 ### Studio
 
 Build the model (or take `Vdm.rbxmx` from the
-[releases page](https://github.com/claykrs/Windows-3.x-VDM/releases); release
+[releases page](https://github.com/claykrs/roblox-win3-emulator/releases); release
 models contain only the emulator source, no Microsoft files):
 
 ```powershell
