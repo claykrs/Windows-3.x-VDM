@@ -1,6 +1,6 @@
 # roblox-win3-emulator — Windows 3.0a running inside Roblox
 
-[![CI](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/roblox-win3-emulator) ![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/claykrs/roblox-win3-emulator/actions/workflows/ci.yml) ![Release](https://img.shields.io/github/v/release/claykrs/roblox-win3-emulator) ![License](https://img.shields.io/badge/license-MIT-blue) ![Status](https://img.shields.io/badge/status-complete-brightgreen)
 
 RVDM is an 8086 real-mode PC emulator written in Luau that boots the real
 Microsoft Windows 3.0a binaries inside Roblox. `WIN.COM` loads `KERNEL.EXE`,
@@ -164,10 +164,22 @@ lune run tools/check.lua
 Application compatibility is verified with the harness and documented in
 [docs/APP_COMPAT.md](docs/APP_COMPAT.md).
 
-## Known limits
+## Status: complete
+
+The project is finished. v0.8.1 is the final release: Windows 3.0a boots to
+Program Manager and runs all 20 bundled apps plus Tetris, in Studio and under
+Lune, and the Windows 3.1 standard-mode track (real `DOSX.EXE` and
+`KRNL286.EXE` on the 286 protected-mode core) boots to Program Manager and
+completes the MS-DOS Prompt round trip. Details are in the
+[engineering log](docs/ENGINEERING-LOG.md).
+
+Issues and pull requests are still welcome, but none of the following is
+planned.
+
+### Not done
 
 - **640 K real-mode wall.** Conventional memory only; no demand segment
-  loading yet.
+  loading.
 - **No EMS, and no XMS on the 3.0a path.** INT 67h reports EMM as not
   installed; XMS exists in the core but is only enabled on the 286 track.
 - **Stand-in `COMMAND.COM`.** Microsoft's is not part of the Windows media, so
@@ -176,28 +188,10 @@ Application compatibility is verified with the harness and documented in
   anything else answers "Bad command or file name". It is not a real shell.
 - **Instruction-counted timer.** IRQ0 fires every `config.timerInterval`
   instructions, not on wall-clock PIT timing.
-- **Cosmetics.** Some icon planes show colour artifacts and Tetris'
-  score/level/lines digits draw beside their opaque value backgrounds.
-  Gameplay is unaffected.
+- **Cosmetics.** Some icon planes show colour artifacts.
 - **Missing subsystems.** No printer (LPT/INT 17h/spooler), serial (8250/INT
   14h) or OLE/clipboard backends; installers run from the staged VFS only.
-
-## In progress: Windows 3.1 standard mode
-
-The 286 protected-mode track runs the real `DOSX.EXE` and `KRNL286.EXE`:
-
-- The protected-mode core (GDT/LDT/IDT/TSS, expand-down segments, ring
-  transitions, real↔protected mode switching) and the XMS driver are done.
-- The boot reaches a drawn Program Manager in standard mode and the apps load.
-- MS-DOS Prompt launches through WSWAP/DSWAP, returns on `exit`, and Windows
-  resumes after the swap-in (v0.8.1). Details are in the
-  [engineering log](docs/ENGINEERING-LOG.md).
-
-## Roadmap
-
-- **Windows 3.0a real mode:** EMS, demand segment loading, printer/serial
-  backends and the remaining cosmetic fixes.
-- **Windows 3.1 standard mode (286 protected mode):** boots to Program
-  Manager and runs the MS-DOS Prompt round trip; next is the app matrix.
-- **386 enhanced mode** (paging/V86/VxD) is a later track for the wider 3.1
-  software library.
+- **Windows 3.1 app matrix.** Standard mode boots and its apps load, but they
+  were never checked one by one the way the 3.0a apps were.
+- **386 enhanced mode** (paging, V86, VxDs), which most later Windows 3.1
+  software needs, was never started.
