@@ -88,15 +88,16 @@ Machine internals:
 
 ### Harness (Lune)
 
-Lune 0.11.1 ships in `tools/bin/`. The harness boots the real media and
-reports exactly where the boot stopped; screenshots land in `tools/out/`
-(git-ignored).
+Install the pinned tools (Lune 0.11.1, selene, StyLua, luau) with
+[Rokit](https://github.com/rojo-rbx/rokit): run `rokit install` in the repo.
+The harness boots the real media and reports exactly where the boot stopped;
+screenshots land in `tools/out/` (git-ignored).
 
 ```powershell
-tools\bin\lune.exe run tools/app_harness.lua boot CALC --timer 55000
-tools\bin\lune.exe run tools/app_harness.lua boot all --via ini --steps 5000000 --timer 55000
-tools\bin\lune.exe run tools/app_harness.lua list     # NE header facts
-tools\bin\lune.exe run tools/app_harness.lua audit    # SETUP.INF staging coverage
+lune run tools/app_harness.lua boot CALC --timer 55000
+lune run tools/app_harness.lua boot all --via ini --steps 5000000 --timer 55000
+lune run tools/app_harness.lua list     # NE header facts
+lune run tools/app_harness.lua audit    # SETUP.INF staging coverage
 ```
 
 Always pass `--timer 55000` for guest code. The default 25,000 fires IRQ0
@@ -105,12 +106,14 @@ are diagnostic only.
 
 ### Studio
 
-Build the model (or take `Vdm.rbxmx` from the
-[releases page](https://github.com/claykrs/roblox-win3-emulator/releases); release
-models contain only the emulator source, no Microsoft files):
+The model from the [releases page](https://github.com/claykrs/roblox-win3-emulator/releases)
+holds the whole emulator and its Studio window, but no Microsoft files, so on
+its own it boots the bundled test program. To boot Windows, pack your own
+Windows 3.0a disks first ([Media pipeline](#media-pipeline-and-licensing)),
+then build the model, which picks up the packed `fixtures/WinBoot*.lua`:
 
 ```powershell
-tools\bin\lune.exe run tools/build_rbxmx.lua   # writes Vdm.rbxmx
+lune run tools/build_rbxmx.lua   # writes Vdm.rbxmx
 ```
 
 1. Import `Vdm.rbxmx` — it installs `Vdm`, `VdmUi` and `VdmFixtures` into
@@ -118,9 +121,9 @@ tools\bin\lune.exe run tools/build_rbxmx.lua   # writes Vdm.rbxmx
 2. Enable **Game Settings → Security → Allow Mesh / Image APIs**. Without it
    `EditableImage` creation fails and `VgaSink` falls back to its 32-column
    Frame grid.
-3. Set the `ReplicatedStorage` attribute `VdmBootWindows` to `true`. Without
-   the attribute the client shows the bundled NE4 test fixture instead of
-   Windows.
+3. Set the `ReplicatedStorage` attribute `VdmBootWindows` to `true` and press
+   Play. Without the attribute the client shows the bundled NE4 test fixture
+   instead of Windows.
 
 ![Program Manager booted live in Roblox Studio](docs/screenshots/r7-studio-program-manager.jpg)
 
@@ -131,9 +134,9 @@ releases. Supply your own Windows 3.0a 5.25-inch 1.2 MB `.IMG` set in
 `media/win30/Microsoft Windows 3.0a (5.25 1.2MB)/`. Then:
 
 ```powershell
-tools\bin\lune.exe run tools/extract.lua        # FAT12 floppies -> media/win30/files/
-tools\bin\lune.exe run tools/stage.lua          # SZDD decompress -> media/win30/staged/
-tools\bin\lune.exe run tools/pack_winboot.lua   # -> fixtures/WinBoot*.lua (git-ignored)
+lune run tools/extract.lua        # FAT12 floppies -> media/win30/files/
+lune run tools/stage.lua          # SZDD decompress -> media/win30/staged/
+lune run tools/pack_winboot.lua   # -> fixtures/WinBoot*.lua (git-ignored)
 ```
 
 `extract.lua` walks the FAT12 floppy images, `stage.lua` decompresses
@@ -155,7 +158,7 @@ check, selene lint over core/tools/tests plus a Roblox-config pass,
 1015 assertions.
 
 ```powershell
-tools\bin\lune.exe run tools/check.lua
+lune run tools/check.lua
 ```
 
 Application compatibility is verified with the harness and documented in
