@@ -189,8 +189,8 @@ The 286 protected-mode track runs the real `DOSX.EXE` and `KRNL286.EXE`:
 - The protected-mode core (GDT/LDT/IDT/TSS, expand-down segments, ring
   transitions, real↔protected mode switching) and the XMS driver are done.
 - The boot reaches a drawn Program Manager in standard mode and the apps load.
-- MS-DOS Prompt launches through WSWAP/DSWAP and returns on `exit`.
-- Open: Windows can fault when it resumes after a swap-in. Details are in the
+- MS-DOS Prompt launches through WSWAP/DSWAP, returns on `exit`, and Windows
+  resumes after the swap-in (v0.8.1). Details are in the
   [engineering log](docs/ENGINEERING-LOG.md).
 
 ## Roadmap
@@ -198,6 +198,6 @@ The 286 protected-mode track runs the real `DOSX.EXE` and `KRNL286.EXE`:
 - **Windows 3.0a real mode:** EMS, demand segment loading, printer/serial
   backends and the remaining cosmetic fixes.
 - **Windows 3.1 standard mode (286 protected mode):** boots to Program
-  Manager; MS-DOS Prompt resume is the open item.
+  Manager and runs the MS-DOS Prompt round trip; next is the app matrix.
 - **386 enhanced mode** (paging/V86/VxD) is a later track for the wider 3.1
   software library.
