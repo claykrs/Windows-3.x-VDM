@@ -46,7 +46,7 @@ VGA; nothing on screen is drawn by the host.
 
 | | |
 | --- | --- |
-| ![Notepad after typing through the emulated 8042 keyboard](docs/screenshots/r6-notepad-keyboard.png) | ![Tetris 2.0 in the Studio host window](docs/screenshots/tetris-playfield.png) |
+| ![Notepad after typing through the emulated 8042 keyboard](docs/screenshots/r6-notepad-keyboard.png) | ![Tetris 2.0 mid-game, score and level drawn by the real game](docs/images/tetris.png) |
 | *Typing in Notepad through the emulated keyboard* | *Microsoft Tetris 2.0* |
 
 ## Architecture
@@ -125,7 +125,7 @@ lune run tools/build_rbxmx.lua   # writes Vdm.rbxmx
    Play. Without the attribute the client shows the bundled NE4 test fixture
    instead of Windows.
 
-![Program Manager booted live in Roblox Studio](docs/screenshots/r7-studio-program-manager.jpg)
+![Windows 3.0a booted live in Roblox Studio, in the emulator's host window](docs/images/studio.png)
 
 ## Media pipeline and licensing
 
